@@ -9,6 +9,7 @@ import (
 	"iter"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,17 @@ import (
 const (
 	defaultOpenAIBaseURL = "https://api.openai.com/v1"
 	openAITimeout        = 30 * time.Second
+
+	// openAIRoleAssistant is the OpenAI role for model-authored messages.
+	openAIRoleAssistant = "assistant"
+	// openAIRoleSystem is the OpenAI role for the system instruction.
+	openAIRoleSystem = "system"
+	// openAIRoleTool is the OpenAI role for tool results sent back to the model.
+	openAIRoleTool = "tool"
+	// openAIRoleUser is the OpenAI role for end-user messages.
+	openAIRoleUser = "user"
+	// openAIToolTypeFunction is the only tool type this adapter emits.
+	openAIToolTypeFunction = "function"
 )
 
 func openAIBaseURL() string {
@@ -36,24 +48,51 @@ type OpenAIModel struct {
 	client *http.Client
 }
 
+// openAIToolDefinition is one entry of the request "tools" array.
+type openAIToolDefinition struct {
+	Type     string          `json:"type"`
+	Function json.RawMessage `json:"function"`
+}
+
+// openAIFunction carries a declared function and, on the response path, the
+// arguments produced by the model.
+type openAIFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Arguments   json.RawMessage `json:"arguments,omitempty"`
+}
+
+// openAIToolCall is one entry of a response message "tool_calls" array.
+type openAIToolCall struct {
+	ID       string         `json:"id"`
+	Type     string         `json:"type"`
+	Function openAIFunction `json:"function"`
+}
+
 type openAIChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
-	MaxTokens   int32           `json:"max_tokens,omitempty"`
-	Stop        []string        `json:"stop,omitempty"`
+	Model       string                 `json:"model"`
+	Messages    []openAIMessage        `json:"messages"`
+	Temperature float64                `json:"temperature,omitempty"`
+	TopP        float64                `json:"top_p,omitempty"`
+	MaxTokens   int32                  `json:"max_tokens,omitempty"`
+	Stop        []string               `json:"stop,omitempty"`
+	Tools       []openAIToolDefinition `json:"tools,omitempty"`
 }
 
 type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+}
+
+type openAIChoice struct {
+	Message openAIMessage `json:"message"`
 }
 
 type openAIChatResponse struct {
-	Choices []struct {
-		Message openAIMessage `json:"message"`
-	} `json:"choices"`
+	Choices []openAIChoice `json:"choices"`
 }
 
 // NewOpenAIModel creates an ADK-compatible model backed by the OpenAI API.
@@ -102,9 +141,20 @@ func (m *OpenAIModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 		return nil, err
 	}
 
+	// When the model returns function calls, ADK must run another turn to
+	// execute the tools and feed results back. Reporting TurnComplete here
+	// would end the run before any tool ever executes.
+	hasToolCalls := false
+	for _, part := range content.Parts {
+		if part.FunctionCall != nil {
+			hasToolCalls = true
+			break
+		}
+	}
+
 	return &model.LLMResponse{
 		Content:      content,
-		TurnComplete: true,
+		TurnComplete: !hasToolCalls,
 	}, nil
 }
 
@@ -132,9 +182,75 @@ func buildChatRequest(req *model.LLMRequest, modelName string) (openAIChatReques
 		if len(req.Config.StopSequences) > 0 {
 			payload.Stop = req.Config.StopSequences
 		}
+
+		if tools := openAIToolsFromConfig(req.Config); len(tools) > 0 {
+			payload.Tools = tools
+		}
 	}
 
 	return payload, nil
+}
+
+// openAIToolsFromConfig converts genai tool configuration into OpenAI tool
+// definitions. Function names that do not satisfy the OpenAI pattern are
+// skipped rather than sent and rejected.
+func openAIToolsFromConfig(cfg *genai.GenerateContentConfig) []openAIToolDefinition {
+	if cfg == nil || len(cfg.Tools) == 0 {
+		return nil
+	}
+
+	var defs []openAIToolDefinition
+	for _, t := range cfg.Tools {
+		if t == nil {
+			continue
+		}
+		for _, fd := range t.FunctionDeclarations {
+			if fd == nil {
+				continue
+			}
+
+			// The OpenAI API only accepts function names matching
+			// ^[a-zA-Z0-9_-]+$.
+			if !isValidOpenAIFuncName(fd.Name) {
+				continue
+			}
+
+			params := []byte("{}")
+			if fd.Parameters != nil {
+				if p, err := json.Marshal(fd.Parameters); err == nil {
+					params = p
+				}
+			} else if fd.ParametersJsonSchema != nil {
+				if p, err := json.Marshal(fd.ParametersJsonSchema); err == nil {
+					params = p
+				}
+			}
+
+			fn := openAIFunction{
+				Name:        fd.Name,
+				Description: fd.Description,
+				Parameters:  params,
+			}
+			fnJSON, err := json.Marshal(fn)
+			if err != nil {
+				continue
+			}
+			defs = append(defs, openAIToolDefinition{
+				Type:     "function",
+				Function: fnJSON,
+			})
+		}
+	}
+	return defs
+}
+
+// validOpenAIFuncNameRe matches the OpenAI API requirement for function names.
+var validOpenAIFuncNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// isValidOpenAIFuncName checks whether a function name is valid per the OpenAI
+// API spec.
+func isValidOpenAIFuncName(name string) bool {
+	return validOpenAIFuncNameRe.MatchString(name)
 }
 
 func (m *OpenAIModel) doChatRequest(ctx context.Context, payload openAIChatRequest) ([]byte, error) {
@@ -177,11 +293,58 @@ func parseChatResponse(respBody []byte) (*genai.Content, error) {
 		return nil, fmt.Errorf("parse openai response: %w", err)
 	}
 
-	if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
-		return nil, fmt.Errorf("openai response missing content")
+	if len(parsed.Choices) == 0 {
+		return nil, fmt.Errorf("openai response missing choices")
 	}
 
-	return genai.NewContentFromText(parsed.Choices[0].Message.Content, genai.RoleModel), nil
+	msg := parsed.Choices[0].Message
+
+	// A response may carry text, tool calls, or both.
+	var parts []*genai.Part
+
+	if strings.TrimSpace(msg.Content) != "" {
+		parts = append(parts, genai.NewPartFromText(msg.Content))
+	}
+
+	for _, tc := range msg.ToolCalls {
+		if tc.Type != openAIToolTypeFunction {
+			continue
+		}
+
+		// OpenAI-compatible providers return arguments as a JSON string.
+		// Some (DeepSeek) return it doubly encoded: the RawMessage holds a
+		// JSON string whose value is the JSON object. Try the string form
+		// first, then the object form, and fall back to a raw wrapper so the
+		// call still reaches the executor instead of being dropped.
+		var args map[string]any
+		if len(tc.Function.Arguments) > 0 {
+			var argsStr string
+			if err := json.Unmarshal(tc.Function.Arguments, &argsStr); err == nil {
+				if unmarshalErr := json.Unmarshal([]byte(argsStr), &args); unmarshalErr != nil {
+					args = map[string]any{"raw": argsStr}
+				}
+			} else if unmarshalErr := json.Unmarshal(tc.Function.Arguments, &args); unmarshalErr != nil {
+				args = map[string]any{"raw": string(tc.Function.Arguments)}
+			}
+		}
+
+		parts = append(parts, &genai.Part{
+			FunctionCall: &genai.FunctionCall{
+				ID:   tc.ID,
+				Name: tc.Function.Name,
+				Args: args,
+			},
+		})
+	}
+
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("openai response missing content and tool_calls")
+	}
+
+	return &genai.Content{
+		Parts: parts,
+		Role:  genai.RoleModel,
+	}, nil
 }
 
 func openAIMessagesFromRequest(req *model.LLMRequest) []openAIMessage {
@@ -195,25 +358,132 @@ func openAIMessagesFromRequest(req *model.LLMRequest) []openAIMessage {
 		text := contentText(req.Config.SystemInstruction)
 		if strings.TrimSpace(text) != "" {
 			messages = append(messages, openAIMessage{
-				Role:    "system",
+				Role:    openAIRoleSystem,
 				Content: text,
 			})
 		}
 	}
 
 	for _, content := range req.Contents {
-		text := contentText(content)
-		if strings.TrimSpace(text) == "" {
+		text, toolCalls, toolResponses := contentToOpenAI(content)
+		if text == "" && len(toolCalls) == 0 && len(toolResponses) == 0 {
 			continue
 		}
 
-		messages = append(messages, openAIMessage{
-			Role:    openAIRole(content.Role),
-			Content: text,
-		})
+		role := openAIRole(content.Role)
+		switch {
+		case role == openAIRoleAssistant && len(toolCalls) > 0:
+			messages = append(messages, openAIMessage{
+				Role:      openAIRoleAssistant,
+				Content:   text,
+				ToolCalls: toolCalls,
+			})
+		case len(toolResponses) > 0:
+			messages = append(messages, toolResponses...)
+		case text != "":
+			messages = append(messages, openAIMessage{
+				Role:    role,
+				Content: text,
+			})
+		}
 	}
 
 	return messages
+}
+
+// contentToOpenAI extracts text, tool calls, and tool responses from a
+// genai.Content so the full tool round trip survives in the message history.
+func contentToOpenAI(content *genai.Content) (string, []openAIToolCall, []openAIMessage) {
+	if content == nil {
+		return "", nil, nil
+	}
+
+	var textParts []string
+	var calls []openAIToolCall
+	var toolResponses []openAIMessage
+
+	for _, part := range content.Parts {
+		if part == nil {
+			continue
+		}
+		if part.Text != "" {
+			textParts = append(textParts, part.Text)
+		}
+		if part.FunctionCall != nil {
+			// The OpenAI API requires arguments as a JSON string, not an
+			// object, so marshal the object and then re-marshal it as a
+			// string value.
+			argsBytes, err := json.Marshal(part.FunctionCall.Args)
+			if err != nil {
+				argsBytes = []byte("{}")
+			}
+			argsStrBytes, err := json.Marshal(string(argsBytes))
+			if err != nil {
+				argsStrBytes = []byte(`"{}"`)
+			}
+			toolCallID := part.FunctionCall.ID
+			if toolCallID == "" {
+				toolCallID = part.FunctionCall.Name
+			}
+			calls = append(calls, openAIToolCall{
+				ID:   toolCallID,
+				Type: openAIToolTypeFunction,
+				Function: openAIFunction{
+					Name:      part.FunctionCall.Name,
+					Arguments: argsStrBytes,
+				},
+			})
+		}
+		if part.FunctionResponse != nil {
+			// Tool results must reach the model as a plain string. Different
+			// MCP servers wrap the payload under different keys, so probe the
+			// known ones before falling back to the whole object.
+			respStr := ""
+			if part.FunctionResponse.Response != nil {
+				switch {
+				case hasString(part.FunctionResponse.Response, "result"):
+					respStr = stringValue(part.FunctionResponse.Response, "result")
+				case hasString(part.FunctionResponse.Response, "response"):
+					respStr = stringValue(part.FunctionResponse.Response, "response")
+				case hasString(part.FunctionResponse.Response, "text"):
+					respStr = stringValue(part.FunctionResponse.Response, "text")
+				case hasString(part.FunctionResponse.Response, "error"):
+					respStr = fmt.Sprintf("error: %s", stringValue(part.FunctionResponse.Response, "error"))
+				case hasString(part.FunctionResponse.Response, "content"):
+					respStr = stringValue(part.FunctionResponse.Response, "content")
+				case hasString(part.FunctionResponse.Response, "output"):
+					respStr = stringValue(part.FunctionResponse.Response, "output")
+				default:
+					if b, err := json.Marshal(part.FunctionResponse.Response); err == nil {
+						respStr = string(b)
+					}
+				}
+			}
+			toolCallID := part.FunctionResponse.ID
+			if toolCallID == "" {
+				toolCallID = part.FunctionResponse.Name
+			}
+			toolResponses = append(toolResponses, openAIMessage{
+				Role:       openAIRoleTool,
+				ToolCallID: toolCallID,
+				Content:    respStr,
+			})
+		}
+	}
+
+	return strings.Join(textParts, ""), calls, toolResponses
+}
+
+// hasString reports whether the map holds a string under key.
+func hasString(m map[string]any, key string) bool {
+	_, ok := m[key].(string)
+	return ok
+}
+
+// stringValue returns the string stored under key, or the empty string.
+func stringValue(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
 }
 
 func contentText(content *genai.Content) string {
@@ -236,11 +506,11 @@ func contentText(content *genai.Content) string {
 
 func openAIRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
-	case "assistant", "model":
-		return "assistant"
-	case "system":
-		return "system"
+	case openAIRoleAssistant, "model":
+		return openAIRoleAssistant
+	case openAIRoleSystem:
+		return openAIRoleSystem
 	default:
-		return "user"
+		return openAIRoleUser
 	}
 }
