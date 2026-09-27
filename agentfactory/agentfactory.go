@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -369,7 +370,39 @@ func hostedToolsets(requestToolsets []tool.Toolset, resolvedMCP map[string]agent
 	}
 	sort.Strings(ids)
 
+	// ADK expands every toolset into one flat tool list and packing is not
+	// idempotent: two servers exposing the same tool name abort the turn with
+	// `duplicate tool`. Balda registers the bundled server twice — once as
+	// "balda" and once as a session-scoped binding whose URL is the same
+	// endpoint with a context token appended. Collapse endpoints that differ
+	// only by query, keeping the richer entry (a scoped URL carries the
+	// session context token, so it is a strict superset of the plain one).
+	keeperOf := make(map[string]string, len(ids))
+	skip := make(map[string]bool, len(ids))
 	for _, id := range ids {
+		key := mcpEndpointKey(resolvedMCP[id])
+		if key == "" {
+			continue
+		}
+		keeper, ok := keeperOf[key]
+		if !ok {
+			keeperOf[key] = id
+			continue
+		}
+		// Prefer the entry that carries extra query parameters (scoped URL).
+		if mcpURLIsScoped(resolvedMCP[id]) && !mcpURLIsScoped(resolvedMCP[keeper]) {
+			skip[keeper] = true
+			keeperOf[key] = id
+			continue
+		}
+		skip[id] = true
+	}
+
+	for _, id := range ids {
+		if skip[id] {
+			fmt.Printf("[mcp] skipping duplicate toolset %q: endpoint already served by %q\n", id, keeperOf[mcpEndpointKey(resolvedMCP[id])])
+			continue
+		}
 		transport, err := mcpTransportForConfig(resolvedMCP[id])
 		if err != nil {
 			return nil, fmt.Errorf("create mcp transport %q: %w", id, err)
@@ -381,6 +414,47 @@ func hostedToolsets(requestToolsets []tool.Toolset, resolvedMCP map[string]agent
 		toolsets = append(toolsets, toolset)
 	}
 	return toolsets, nil
+}
+
+// mcpEndpointKey returns a stable identity for an MCP server endpoint. Two
+// configs that address the same host and path are the same server for
+// tool-namespace purposes, so a differing query string (Balda's session-scoped
+// context token) must not make them look distinct.
+//
+// Any transport that carries a URL participates (http and sse). stdio servers
+// have no shared endpoint and return "" so they are never collapsed.
+func mcpEndpointKey(cfg agentconfig.MCPServerConfig) string {
+	switch cfg.Type {
+	case agentconfig.MCPServerTypeHTTP, agentconfig.MCPServerTypeSSE:
+	default:
+		return ""
+	}
+	raw := strings.TrimSpace(cfg.URL)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+// mcpURLIsScoped reports whether an HTTP endpoint carries query parameters,
+// which for Balda means the session-scoped context binding.
+func mcpURLIsScoped(cfg agentconfig.MCPServerConfig) bool {
+	switch cfg.Type {
+	case agentconfig.MCPServerTypeHTTP, agentconfig.MCPServerTypeSSE:
+	default:
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(cfg.URL))
+	if err != nil {
+		return false
+	}
+	return u.RawQuery != ""
 }
 
 func mcpTransportForConfig(cfg agentconfig.MCPServerConfig) (mcp.Transport, error) {
