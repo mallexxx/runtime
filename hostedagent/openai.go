@@ -80,9 +80,15 @@ type openAIChatRequest struct {
 	Tools       []openAIToolDefinition `json:"tools,omitempty"`
 }
 
+// openAIMessage is one entry of the request "messages" array.
+//
+// Content is deliberately not omitempty: the OpenAI schema marks content as
+// required for role=tool, so an empty tool result must serialize as
+// {"role":"tool","tool_call_id":"...","content":""} rather than dropping the
+// key and being rejected.
 type openAIMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
+	Content    string           `json:"content"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 }
@@ -217,7 +223,7 @@ func openAIToolsFromConfig(cfg *genai.GenerateContentConfig) []openAIToolDefinit
 
 			params := []byte("{}")
 			if fd.Parameters != nil {
-				if p, err := json.Marshal(fd.Parameters); err == nil {
+				if p, err := marshalJSONSchema(fd.Parameters); err == nil {
 					params = p
 				}
 			} else if fd.ParametersJsonSchema != nil {
@@ -242,6 +248,88 @@ func openAIToolsFromConfig(cfg *genai.GenerateContentConfig) []openAIToolDefinit
 		}
 	}
 	return defs
+}
+
+// genaiSchemaTypes maps the genai schema type constants onto the JSON Schema
+// type keywords OpenAI expects. genai spells them in upper case ("OBJECT"),
+// JSON Schema and the OpenAI API use lower case ("object"), and sending the
+// upper-case form is rejected.
+var genaiSchemaTypes = map[string]string{
+	"TYPE_UNSPECIFIED": "",
+	"OBJECT":           "object",
+	"ARRAY":            "array",
+	"STRING":           "string",
+	"NUMBER":           "number",
+	"INTEGER":          "integer",
+	"BOOLEAN":          "boolean",
+}
+
+// marshalJSONSchema converts a genai.Schema into the JSON Schema object OpenAI
+// expects and marshals it.
+//
+// A direct json.Marshal of genai.Schema would keep genai's own enum spelling
+// ("type":"OBJECT"), which the OpenAI API rejects, so the schema is rebuilt
+// field by field with lower-case type keywords.
+func marshalJSONSchema(schema *genai.Schema) ([]byte, error) {
+	return json.Marshal(jsonSchemaFromGenai(schema))
+}
+
+// jsonSchemaFromGenai rebuilds a genai.Schema as a JSON Schema value. Nested
+// schemas (properties, items) are converted recursively so their types are
+// lower-cased too.
+func jsonSchemaFromGenai(schema *genai.Schema) map[string]any {
+	if schema == nil {
+		return nil
+	}
+
+	out := make(map[string]any, 8)
+
+	if typeName := strings.ToLower(strings.TrimSpace(string(schema.Type))); typeName != "" {
+		if mapped, ok := genaiSchemaTypes[strings.ToUpper(typeName)]; ok {
+			typeName = mapped
+		}
+		if typeName != "" {
+			out["type"] = typeName
+		}
+	}
+	if strings.TrimSpace(schema.Description) != "" {
+		out["description"] = schema.Description
+	}
+	if strings.TrimSpace(schema.Format) != "" {
+		out["format"] = schema.Format
+	}
+	if len(schema.Enum) > 0 {
+		out["enum"] = append([]string(nil), schema.Enum...)
+	}
+	if len(schema.Required) > 0 {
+		out["required"] = append([]string(nil), schema.Required...)
+	}
+	if schema.Nullable != nil && *schema.Nullable {
+		out["nullable"] = true
+	}
+	if len(schema.Properties) > 0 {
+		properties := make(map[string]any, len(schema.Properties))
+		for name, property := range schema.Properties {
+			if property == nil {
+				continue
+			}
+			properties[name] = jsonSchemaFromGenai(property)
+		}
+		if len(properties) > 0 {
+			out["properties"] = properties
+		}
+	}
+	if schema.Items != nil {
+		out["items"] = jsonSchemaFromGenai(schema.Items)
+	}
+
+	// An object schema must still declare a type when the declaration omitted
+	// one, otherwise the tool parameters are not a valid JSON Schema object.
+	if _, ok := out["type"]; !ok && len(schema.Properties) > 0 {
+		out["type"] = "object"
+	}
+
+	return out
 }
 
 // validOpenAIFuncNameRe matches the OpenAI API requirement for function names.
@@ -316,17 +404,7 @@ func parseChatResponse(respBody []byte) (*genai.Content, error) {
 		// JSON string whose value is the JSON object. Try the string form
 		// first, then the object form, and fall back to a raw wrapper so the
 		// call still reaches the executor instead of being dropped.
-		var args map[string]any
-		if len(tc.Function.Arguments) > 0 {
-			var argsStr string
-			if err := json.Unmarshal(tc.Function.Arguments, &argsStr); err == nil {
-				if unmarshalErr := json.Unmarshal([]byte(argsStr), &args); unmarshalErr != nil {
-					args = map[string]any{"raw": argsStr}
-				}
-			} else if unmarshalErr := json.Unmarshal(tc.Function.Arguments, &args); unmarshalErr != nil {
-				args = map[string]any{"raw": string(tc.Function.Arguments)}
-			}
-		}
+		args := decodeFunctionArguments(tc.Function.Arguments)
 
 		parts = append(parts, &genai.Part{
 			FunctionCall: &genai.FunctionCall{
@@ -380,6 +458,15 @@ func openAIMessagesFromRequest(req *model.LLMRequest) []openAIMessage {
 			})
 		case len(toolResponses) > 0:
 			messages = append(messages, toolResponses...)
+			// A Content may carry tool results and text together. The text is
+			// part of the conversation the model already produced, so keep it as
+			// its own user message instead of dropping it with the tool branch.
+			if text != "" {
+				messages = append(messages, openAIMessage{
+					Role:    openAIRoleUser,
+					Content: text,
+				})
+			}
 		case text != "":
 			messages = append(messages, openAIMessage{
 				Role:    role,
@@ -473,6 +560,59 @@ func contentToOpenAI(content *genai.Content) (string, []openAIToolCall, []openAI
 
 	return strings.Join(textParts, ""), calls, toolResponses
 }
+
+// openAIArgumentsMaxDepth bounds how many times a JSON string encoding of the
+// arguments is peeled. Providers that double-encode wrap once; the extra levels
+// cover a string that itself contains an encoded string without letting a
+// crafted payload drive an unbounded loop.
+const openAIArgumentsMaxDepth = 4
+
+// decodeFunctionArguments turns the raw "arguments" field of a tool call into
+// the object genai.FunctionCall.Args expects.
+//
+// Providers disagree on the shape: some send a JSON object, some send a JSON
+// string holding that object, and some encode it twice. The value is peeled
+// repeatedly until it stops being a JSON string, then coerced into a map. A
+// non-object result is nested under a named key rather than flattened away, so
+// the executor still receives the arguments instead of an opaque wrapper.
+func decodeFunctionArguments(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	value := raw
+	var decoded any
+	for depth := 0; depth < openAIArgumentsMaxDepth; depth++ {
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			break
+		}
+		// A JSON string may itself hold more JSON: unwrap and try again.
+		if asString, ok := decoded.(string); ok {
+			trimmed := strings.TrimSpace(asString)
+			if trimmed == "" {
+				break
+			}
+			value = json.RawMessage(trimmed)
+			continue
+		}
+		break
+	}
+
+	switch typed := decoded.(type) {
+	case map[string]any:
+		return typed
+	case nil:
+		return nil
+	default:
+		// Arrays and scalars are not valid tool arguments on their own. Keep the
+		// payload reachable under a stable key instead of discarding it.
+		return map[string]any{openAIArgumentsValueKey: typed}
+	}
+}
+
+// openAIArgumentsValueKey holds a decoded argument value that is not a JSON
+// object, so no argument data is lost when a provider sends an unexpected shape.
+const openAIArgumentsValueKey = "value"
 
 // hasString reports whether the map holds a string under key.
 func hasString(m map[string]any, key string) bool {

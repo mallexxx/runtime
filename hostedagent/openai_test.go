@@ -11,6 +11,17 @@ import (
 // testFuncName is the function name used across these fixtures.
 const testFuncName = "list_vaults"
 
+// JSON Schema type keywords expected on the wire. They are lower case: genai
+// spells its own enum values in upper case, and sending that form is rejected.
+const (
+	schemaTypeObject  = "object"
+	schemaTypeString  = "string"
+	schemaTypeInteger = "integer"
+	schemaTypeNumber  = "number"
+	schemaTypeBoolean = "boolean"
+	schemaTypeArray   = "array"
+)
+
 func TestOpenAIToolsFromConfig_NilConfig(t *testing.T) {
 	defs := openAIToolsFromConfig(nil)
 	if len(defs) != 0 {
@@ -94,8 +105,8 @@ func TestOpenAIToolsFromConfig_WithParameters(t *testing.T) {
 	if err := json.Unmarshal(fn.Parameters, &params); err != nil {
 		t.Fatalf("unmarshal parameters: %v", err)
 	}
-	if params["type"] != "OBJECT" && params["type"] != "object" {
-		t.Fatalf("expected type 'object'/'OBJECT', got %v", params["type"])
+	if params["type"] != schemaTypeObject {
+		t.Fatalf("expected the JSON Schema keyword %q, got %v", schemaTypeObject, params["type"])
 	}
 }
 
