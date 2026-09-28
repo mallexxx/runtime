@@ -290,13 +290,15 @@ var processEnv = os.Environ
 
 func hydrateMCPServerConfig(cfg agentconfig.MCPServerConfig) agentconfig.MCPServerConfig {
 	hydrated := agentconfig.MCPServerConfig{
-		Type:       cfg.Type,
-		Cmd:        append([]string(nil), cfg.Cmd...),
-		Args:       append([]string(nil), cfg.Args...),
-		Env:        cloneStringMap(cfg.Env),
-		WorkingDir: cfg.WorkingDir,
-		URL:        cfg.URL,
-		Headers:    cloneStringMap(cfg.Headers),
+		Type:           cfg.Type,
+		Cmd:            append([]string(nil), cfg.Cmd...),
+		Args:           append([]string(nil), cfg.Args...),
+		Env:            cloneStringMap(cfg.Env),
+		WorkingDir:     cfg.WorkingDir,
+		URL:            cfg.URL,
+		Headers:        cloneStringMap(cfg.Headers),
+		DedupKey:       cfg.DedupKey,
+		DedupPreferred: cfg.DedupPreferred,
 	}
 	if hydrated.Type != agentconfig.MCPServerTypeStdio {
 		return hydrated
@@ -394,6 +396,9 @@ func hostedToolsets(requestToolsets []tool.Toolset, resolvedMCP map[string]agent
 		if !ok {
 			keeperOf[key] = id
 			continue
+		}
+		if resolvedMCP[id].DedupPreferred && resolvedMCP[keeper].DedupPreferred {
+			return nil, fmt.Errorf("mcp dedup key %q has multiple preferred configs: %q and %q", key, keeper, id)
 		}
 		// A preferred entry replaces the current keeper; a preferred keeper is
 		// never displaced.

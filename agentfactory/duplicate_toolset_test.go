@@ -264,6 +264,48 @@ func TestEmptyDedupKeyNeverCollapses(t *testing.T) {
 	}
 }
 
+// TestHostedToolsetsRejectsMultipleDedupPreferredConfigs makes an ambiguous
+// configuration fail before any transport is constructed. Silently selecting
+// one would make the active authorization or session context depend on ID
+// ordering.
+func TestHostedToolsetsRejectsMultipleDedupPreferredConfigs(t *testing.T) {
+	resolved := map[string]agentconfig.MCPServerConfig{
+		"first": {
+			Type:           agentconfig.MCPServerTypeHTTP,
+			URL:            "http://h:1/mcp?ctx=first",
+			DedupKey:       "bundled",
+			DedupPreferred: true,
+		},
+		"second": {
+			Type:           agentconfig.MCPServerTypeHTTP,
+			URL:            "http://h:1/mcp?ctx=second",
+			DedupKey:       "bundled",
+			DedupPreferred: true,
+		},
+	}
+
+	if _, err := hostedToolsets(nil, resolved); err == nil {
+		t.Fatal("expected multiple preferred configs to be rejected")
+	}
+}
+
+func TestHydrateMCPServerConfigPreservesDedupMetadata(t *testing.T) {
+	cfg := agentconfig.MCPServerConfig{
+		Type:           agentconfig.MCPServerTypeHTTP,
+		URL:            "http://h:1/mcp?balda_context=token",
+		DedupKey:       "bundled",
+		DedupPreferred: true,
+	}
+
+	hydrated := hydrateMCPServerConfig(cfg)
+	if hydrated.DedupKey != cfg.DedupKey {
+		t.Fatalf("DedupKey = %q, want %q", hydrated.DedupKey, cfg.DedupKey)
+	}
+	if !hydrated.DedupPreferred {
+		t.Fatal("DedupPreferred was lost while hydrating the MCP config")
+	}
+}
+
 // TestHostedToolsetsKeepsDistinctEndpoints guards against over-collapsing:
 // genuinely different MCP servers must all survive.
 func TestHostedToolsetsKeepsDistinctEndpoints(t *testing.T) {
