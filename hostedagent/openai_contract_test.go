@@ -58,6 +58,28 @@ func TestOpenAIToolAliasesRoundTripMCPAndLongNames(t *testing.T) {
 	}
 }
 
+func TestOpenAIToolAliasesPreserveWhitespaceInRuntimeName(t *testing.T) {
+	const spacedName = " foo "
+	const plainName = "foo"
+	cfg := &genai.GenerateContentConfig{
+		Tools: []*genai.Tool{{
+			FunctionDeclarations: []*genai.FunctionDeclaration{
+				{Name: spacedName},
+				{Name: plainName},
+			},
+		}},
+	}
+
+	_, openAIToRuntime, runtimeToOpenAI := openAIToolsWithAliases(cfg)
+	alias := runtimeToOpenAI[spacedName]
+	if alias == "" || alias == plainName {
+		t.Fatalf("spaced runtime name alias = %q, want a distinct OpenAI-safe alias", alias)
+	}
+	if got := openAIToRuntime[alias]; got != spacedName {
+		t.Fatalf("alias %q resolves to %q, want exact original %q", alias, got, spacedName)
+	}
+}
+
 func TestMarshalJSONSchemaPreservesEveryGenaiSchemaField(t *testing.T) {
 	maxItems, maxLength, maxProperties := int64(5), int64(6), int64(7)
 	maximum := 8.5

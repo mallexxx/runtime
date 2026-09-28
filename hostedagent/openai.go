@@ -258,8 +258,8 @@ func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefin
 				continue
 			}
 
-			runtimeName := strings.TrimSpace(fd.Name)
-			if runtimeName == "" {
+			runtimeName := fd.Name
+			if strings.TrimSpace(runtimeName) == "" {
 				continue
 			}
 			openAIName := runtimeName
