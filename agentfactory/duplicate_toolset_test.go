@@ -264,6 +264,36 @@ func TestEmptyDedupKeyNeverCollapses(t *testing.T) {
 	}
 }
 
+// TestDedupKeyIsOpaque ensures the runtime does not normalize caller-defined
+// keys. Normalizing whitespace would make independently configured namespaces
+// collide and could recreate the cross-tenant merge this opt-in API prevents.
+func TestDedupKeyIsOpaque(t *testing.T) {
+	resolved := map[string]agentconfig.MCPServerConfig{
+		"exact": {
+			Type:     agentconfig.MCPServerTypeHTTP,
+			URL:      "http://h:1/mcp?tenant=exact",
+			DedupKey: "tenant-a",
+		},
+		"spaced": {
+			Type:     agentconfig.MCPServerTypeHTTP,
+			URL:      "http://h:1/mcp?tenant=spaced",
+			DedupKey: " tenant-a ",
+		},
+	}
+
+	endpoints := recordTransportEndpoints(t)
+	toolsets, err := hostedToolsets(nil, resolved)
+	if err != nil {
+		t.Fatalf("hostedToolsets: %v", err)
+	}
+	if got := len(toolsets); got != 2 {
+		t.Fatalf("expected distinct opaque keys to keep 2 toolsets, got %d", got)
+	}
+	if got := len(*endpoints); got != 2 {
+		t.Fatalf("expected 2 transport constructions, got %d", got)
+	}
+}
+
 // TestHostedToolsetsRejectsMultipleDedupPreferredConfigs makes an ambiguous
 // configuration fail before any transport is constructed. Silently selecting
 // one would make the active authorization or session context depend on ID

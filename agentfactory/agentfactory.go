@@ -388,8 +388,8 @@ func hostedToolsets(requestToolsets []tool.Toolset, resolvedMCP map[string]agent
 	keeperOf := make(map[string]string, len(ids))
 	skip := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		key := strings.TrimSpace(resolvedMCP[id].DedupKey)
-		if key == "" {
+		key := resolvedMCP[id].DedupKey
+		if strings.TrimSpace(key) == "" {
 			continue
 		}
 		keeper, ok := keeperOf[key]
@@ -408,7 +408,6 @@ func hostedToolsets(requestToolsets []tool.Toolset, resolvedMCP map[string]agent
 			continue
 		}
 		skip[id] = true
-		fmt.Printf("[mcp] skipping duplicate toolset %q: dedup key %q already served by %q\n", id, key, keeper)
 	}
 
 	for _, id := range ids {
