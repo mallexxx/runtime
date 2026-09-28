@@ -1,8 +1,11 @@
 package hostedagent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -77,6 +80,105 @@ func TestOpenAIToolAliasesPreserveWhitespaceInRuntimeName(t *testing.T) {
 	}
 	if got := openAIToRuntime[alias]; got != spacedName {
 		t.Fatalf("alias %q resolves to %q, want exact original %q", alias, got, spacedName)
+	}
+}
+
+func TestOpenAIToolAliasesAreStableWhenDeclarationsChangeOrder(t *testing.T) {
+	first := &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+		FunctionDeclarations: []*genai.FunctionDeclaration{
+			{Name: "first.tool"},
+			{Name: "second.tool"},
+		},
+	}}}
+	second := &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+		FunctionDeclarations: []*genai.FunctionDeclaration{
+			{Name: "second.tool"},
+			{Name: "first.tool"},
+		},
+	}}}
+
+	_, _, firstMap := openAIToolsWithAliases(first)
+	_, _, secondMap := openAIToolsWithAliases(second)
+	for _, name := range []string{"first.tool", "second.tool"} {
+		if firstMap[name] != secondMap[name] {
+			t.Fatalf("alias for %q changed from %q to %q", name, firstMap[name], secondMap[name])
+		}
+	}
+}
+
+func TestOpenAIToolAliasesCoverHistoricalToolsMissingFromCurrentConfig(t *testing.T) {
+	const historicalName = "balda.control.shutdown"
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{
+			Role:  genai.RoleModel,
+			Parts: []*genai.Part{genai.NewPartFromFunctionCall(historicalName, map[string]any{})},
+		}, genai.NewContentFromText("continue", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+			FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "current_tool"}},
+		}}},
+	}
+
+	payload, err := buildChatRequest(req, "test-model")
+	if err != nil {
+		t.Fatalf("buildChatRequest: %v", err)
+	}
+	alias := payload.Messages[0].ToolCalls[0].Function.Name
+	if alias == historicalName || !isValidOpenAIFuncName(alias) {
+		t.Fatalf("historical tool name = %q, want stable OpenAI-safe alias", alias)
+	}
+}
+
+func TestOpenAIToolAliasesAreIdempotentForCurrentAndHistoricalCalls(t *testing.T) {
+	const toolName = "balda.control.shutdown"
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{
+			Role:  genai.RoleModel,
+			Parts: []*genai.Part{genai.NewPartFromFunctionCall(toolName, map[string]any{})},
+		}, genai.NewContentFromText("continue", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+			FunctionDeclarations: []*genai.FunctionDeclaration{{Name: toolName}},
+		}}},
+	}
+
+	payload, err := buildChatRequest(req, "test-model")
+	if err != nil {
+		t.Fatalf("buildChatRequest: %v", err)
+	}
+	declared := payload.Tools[0].Function
+	var declaration openAIFunction
+	if err := json.Unmarshal(declared, &declaration); err != nil {
+		t.Fatalf("decode declaration: %v", err)
+	}
+	historical := payload.Messages[0].ToolCalls[0].Function.Name
+	if historical != declaration.Name {
+		t.Fatalf("historical alias = %q, declaration alias = %q", historical, declaration.Name)
+	}
+}
+
+func TestOpenAIToolAliasesAvoidValidRuntimeNameCollisions(t *testing.T) {
+	const runtimeName = "balda.control.shutdown"
+	collisionName := stableOpenAIFunctionAlias(runtimeName, nil, nil)
+	cfg := &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+		FunctionDeclarations: []*genai.FunctionDeclaration{
+			{Name: runtimeName},
+			{Name: collisionName},
+		},
+	}}}
+
+	defs, _, _ := openAIToolsWithAliases(cfg)
+	if len(defs) != 2 {
+		t.Fatalf("got %d definitions, want 2", len(defs))
+	}
+	names := make(map[string]struct{}, len(defs))
+	for _, definition := range defs {
+		var function openAIFunction
+		if err := json.Unmarshal(definition.Function, &function); err != nil {
+			t.Fatalf("decode function: %v", err)
+		}
+		if _, duplicate := names[function.Name]; duplicate {
+			t.Fatalf("duplicate OpenAI function name %q", function.Name)
+		}
+		names[function.Name] = struct{}{}
 	}
 }
 
@@ -349,16 +451,6 @@ func TestArgumentsUnwrapRepeatedEncoding(t *testing.T) {
 			raw:  `"\"{\\\"query\\\":\\\"x\\\"}\""`,
 			want: map[string]any{"query": "x"},
 		},
-		{
-			name: "string holding an array",
-			raw:  `"[{\"query\":\"x\"}]"`,
-			want: map[string]any{openAIArgumentsValueKey: []any{map[string]any{"query": "x"}}},
-		},
-		{
-			name: "string holding a scalar",
-			raw:  `"just-a-string"`,
-			want: map[string]any{openAIArgumentsValueKey: "just-a-string"},
-		},
 	}
 
 	for _, testCase := range cases {
@@ -378,15 +470,12 @@ func TestArgumentsUnwrapRepeatedEncoding(t *testing.T) {
 			if string(gotJSON) != string(wantJSON) {
 				t.Fatalf("decodeFunctionArguments(%s) = %s, want %s", testCase.raw, gotJSON, wantJSON)
 			}
-			if _, wrapped := got["raw"]; wrapped {
-				t.Fatalf("arguments fell back to the opaque raw wrapper: %s", gotJSON)
-			}
 		})
 	}
 }
 
 // TestArgumentsUnwrapIsBounded pins that a pathological nesting cannot drive an
-// unbounded peel and that the result is still a map.
+// unbounded peel and is rejected once the bounded depth is exhausted.
 func TestArgumentsUnwrapIsBounded(t *testing.T) {
 	// A JSON string of a JSON string of ... repeated many times.
 	nested := `"value"`
@@ -398,15 +487,8 @@ func TestArgumentsUnwrapIsBounded(t *testing.T) {
 		nested = string(encoded)
 	}
 
-	got, err := decodeFunctionArguments(json.RawMessage(nested))
-	if err != nil {
-		t.Fatalf("decodeFunctionArguments: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected a non-nil map for a deeply nested payload")
-	}
-	if _, wrapped := got["raw"]; wrapped {
-		t.Fatalf("unexpected raw wrapper: %v", got)
+	if _, err := decodeFunctionArguments(json.RawMessage(nested)); err == nil {
+		t.Fatal("expected deeply nested arguments to be rejected")
 	}
 }
 
@@ -426,4 +508,111 @@ func TestParseChatResponseRejectsInvalidToolArguments(t *testing.T) {
 	if _, err := parseChatResponse([]byte(resp)); err == nil {
 		t.Fatal("expected invalid tool arguments to fail")
 	}
+}
+
+func TestParseChatResponseRejectsNonObjectToolArguments(t *testing.T) {
+	for _, raw := range []string{`[]`, `"text"`, `null`} {
+		t.Run(raw, func(t *testing.T) {
+			resp := fmt.Sprintf(`{"choices":[{"message":{"tool_calls":[{"id":"call-1","type":"function","function":{"name":"list_vaults","arguments":%s}}]}}]}`, raw)
+			if _, err := parseChatResponse([]byte(resp)); err == nil {
+				t.Fatalf("expected non-object arguments %s to fail", raw)
+			}
+		})
+	}
+}
+
+func TestOpenAIToolsFromConfigSkipsDuplicateNames(t *testing.T) {
+	cfg := &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+		FunctionDeclarations: []*genai.FunctionDeclaration{
+			{Name: "duplicate"},
+			{Name: "duplicate"},
+		},
+	}}}
+
+	defs := openAIToolsFromConfig(cfg)
+	if len(defs) != 1 {
+		t.Fatalf("got %d definitions, want one", len(defs))
+	}
+}
+
+func TestFunctionResponseTextPrefersOutputAndPreservesValues(t *testing.T) {
+	response := map[string]any{
+		"output": map[string]any{"ok": true},
+		"result": "stale",
+	}
+	if got := functionResponseText(response); got != `{"ok":true}` {
+		t.Fatalf("functionResponseText() = %q, want structured output", got)
+	}
+}
+
+func TestFunctionResponseTextPreservesOutputAndError(t *testing.T) {
+	response := map[string]any{
+		"output": "partial",
+		"error":  "failed",
+	}
+	if got := functionResponseText(response); got != `{"error":"failed","output":"partial"}` {
+		t.Fatalf("functionResponseText() = %q, want output and error", got)
+	}
+}
+
+func TestOpenAIModelGenerateContentToolCallWireContract(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			return nil, fmt.Errorf("request = %s %s, want POST /v1/chat/completions", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			return nil, fmt.Errorf("authorization = %q, want bearer token", got)
+		}
+
+		var request struct {
+			Model    string                 `json:"model"`
+			Messages []openAIMessage        `json:"messages"`
+			Tools    []openAIToolDefinition `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return nil, fmt.Errorf("decode request: %w", err)
+		}
+		if request.Model != "test-model" || len(request.Messages) != 1 || len(request.Tools) != 1 {
+			return nil, fmt.Errorf("wire request = %+v, want model, one message, one tool", request)
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"list_vaults","arguments":"{\"limit\":2}"}}]}}]}`)),
+			Request:    r,
+		}, nil
+	})}
+
+	openAIModel, err := NewOpenAIModel("test-key", "test-model")
+	if err != nil {
+		t.Fatalf("NewOpenAIModel: %v", err)
+	}
+	openAIModel.client = client
+
+	response, err := openAIModel.generate(context.Background(), &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("list vaults", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+			FunctionDeclarations: []*genai.FunctionDeclaration{{
+				Name:       "list_vaults",
+				Parameters: &genai.Schema{Type: genai.TypeObject},
+			}},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if response.TurnComplete {
+		t.Fatal("tool call response must leave the turn open")
+	}
+	call := response.Content.Parts[0].FunctionCall
+	if call == nil || call.ID != "call-1" || call.Name != "list_vaults" || call.Args["limit"] != float64(2) {
+		t.Fatalf("tool call = %+v, want decoded call-1/list_vaults/{limit:2}", call)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }

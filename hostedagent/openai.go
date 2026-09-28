@@ -3,6 +3,7 @@ package hostedagent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -172,8 +173,19 @@ func buildChatRequest(req *model.LLMRequest, modelName string) (openAIChatReques
 	var tools []openAIToolDefinition
 	var aliases map[string]string
 	var runtimeToOpenAI map[string]string
+	reservedNames := openAIReservedFunctionNames(nil)
 	if req != nil && req.Config != nil {
 		tools, aliases, runtimeToOpenAI = openAIToolsWithAliases(req.Config)
+		reservedNames = openAIReservedFunctionNames(req.Config)
+	}
+	if aliases == nil {
+		aliases = make(map[string]string)
+	}
+	if runtimeToOpenAI == nil {
+		runtimeToOpenAI = make(map[string]string)
+	}
+	if req != nil {
+		addHistoricalToolAliases(req.Contents, aliases, runtimeToOpenAI, reservedNames)
 	}
 
 	messages := openAIMessagesFromRequestWithAliases(req, runtimeToOpenAI)
@@ -224,28 +236,15 @@ func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefin
 		return nil, nil, nil
 	}
 
-	reserved := make(map[string]bool)
-	for _, t := range cfg.Tools {
-		if t == nil {
-			continue
-		}
-		for _, fd := range t.FunctionDeclarations {
-			if fd != nil && isValidOpenAIFuncName(fd.Name) {
-				reserved[fd.Name] = true
-			}
-		}
-	}
 	aliases := make(map[string]string)
 	runtimeToOpenAI := make(map[string]string)
-	nextAlias := 1
-	newAlias := func() string {
-		for {
-			candidate := fmt.Sprintf("runtime_tool_%d", nextAlias)
-			nextAlias++
-			if !reserved[candidate] && aliases[candidate] == "" {
-				return candidate
-			}
-		}
+	seenRuntimeNames := make(map[string]struct{})
+	reservedNames := openAIReservedFunctionNames(cfg)
+	newAlias := func(runtimeName string) string {
+		// The alias must be stable across turns. Tool declarations can be
+		// reordered or a subset can be sent on a later turn, while the history
+		// still contains calls from earlier turns.
+		return stableOpenAIFunctionAlias(runtimeName, aliases, reservedNames)
 	}
 
 	var defs []openAIToolDefinition
@@ -262,9 +261,13 @@ func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefin
 			if strings.TrimSpace(runtimeName) == "" {
 				continue
 			}
+			if _, seen := seenRuntimeNames[runtimeName]; seen {
+				continue
+			}
+			seenRuntimeNames[runtimeName] = struct{}{}
 			openAIName := runtimeName
 			if !isValidOpenAIFuncName(runtimeName) {
-				openAIName = newAlias()
+				openAIName = newAlias(runtimeName)
 				aliases[openAIName] = runtimeName
 				runtimeToOpenAI[runtimeName] = openAIName
 			}
@@ -296,6 +299,74 @@ func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefin
 		}
 	}
 	return defs, aliases, runtimeToOpenAI
+}
+
+func openAIReservedFunctionNames(cfg *genai.GenerateContentConfig) map[string]struct{} {
+	reserved := make(map[string]struct{})
+	if cfg == nil {
+		return reserved
+	}
+	for _, tool := range cfg.Tools {
+		if tool == nil {
+			continue
+		}
+		for _, declaration := range tool.FunctionDeclarations {
+			if declaration != nil && isValidOpenAIFuncName(declaration.Name) {
+				reserved[declaration.Name] = struct{}{}
+			}
+		}
+	}
+	return reserved
+}
+
+func addHistoricalToolAliases(contents []*genai.Content, aliases, runtimeToOpenAI map[string]string, reservedNames map[string]struct{}) {
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part != nil && part.FunctionCall != nil && isValidOpenAIFuncName(part.FunctionCall.Name) {
+				reservedNames[part.FunctionCall.Name] = struct{}{}
+			}
+		}
+	}
+
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part == nil || part.FunctionCall == nil {
+				continue
+			}
+			runtimeName := part.FunctionCall.Name
+			if isValidOpenAIFuncName(runtimeName) {
+				continue
+			}
+			if !isValidOpenAIFuncName(runtimeName) {
+				alias := stableOpenAIFunctionAlias(runtimeName, aliases, reservedNames)
+				aliases[alias] = runtimeName
+				runtimeToOpenAI[runtimeName] = alias
+			}
+		}
+	}
+}
+
+func stableOpenAIFunctionAlias(runtimeName string, aliases map[string]string, reservedNames map[string]struct{}) string {
+	for salt := 0; ; salt++ {
+		seed := runtimeName
+		if salt > 0 {
+			seed = fmt.Sprintf("%s#%d", runtimeName, salt)
+		}
+		digest := sha256.Sum256([]byte(seed))
+		candidate := fmt.Sprintf("runtime_tool_%x", digest[:12])
+		_, reserved := reservedNames[candidate]
+		if !reserved {
+			if mappedRuntimeName, exists := aliases[candidate]; !exists || mappedRuntimeName == runtimeName {
+				return candidate
+			}
+		}
+	}
 }
 
 // genaiSchemaTypes maps the genai schema type constants onto the JSON Schema
@@ -497,25 +568,20 @@ func openAIMessagesFromRequestWithAliases(req *model.LLMRequest, runtimeToOpenAI
 		}
 
 		role := openAIRole(content.Role)
-		switch {
-		case role == openAIRoleAssistant && len(toolCalls) > 0:
+		if len(toolCalls) > 0 {
+			if role != openAIRoleAssistant {
+				role = openAIRoleAssistant
+			}
 			messages = append(messages, openAIMessage{
-				Role:      openAIRoleAssistant,
+				Role:      role,
 				Content:   text,
 				ToolCalls: toolCalls,
 			})
-		case len(toolResponses) > 0:
+		}
+		if len(toolResponses) > 0 {
 			messages = append(messages, toolResponses...)
-			// A Content may carry tool results and text together. The text is
-			// part of the conversation the model already produced, so keep it as
-			// its own user message instead of dropping it with the tool branch.
-			if text != "" {
-				messages = append(messages, openAIMessage{
-					Role:    openAIRoleUser,
-					Content: text,
-				})
-			}
-		case text != "":
+		}
+		if text != "" && len(toolCalls) == 0 {
 			messages = append(messages, openAIMessage{
 				Role:    role,
 				Content: text,
@@ -578,30 +644,7 @@ func contentToOpenAIWithAliases(content *genai.Content, runtimeToOpenAI map[stri
 			})
 		}
 		if part.FunctionResponse != nil {
-			// Tool results must reach the model as a plain string. Different
-			// MCP servers wrap the payload under different keys, so probe the
-			// known ones before falling back to the whole object.
-			respStr := ""
-			if part.FunctionResponse.Response != nil {
-				switch {
-				case hasString(part.FunctionResponse.Response, "result"):
-					respStr = stringValue(part.FunctionResponse.Response, "result")
-				case hasString(part.FunctionResponse.Response, "response"):
-					respStr = stringValue(part.FunctionResponse.Response, "response")
-				case hasString(part.FunctionResponse.Response, "text"):
-					respStr = stringValue(part.FunctionResponse.Response, "text")
-				case hasString(part.FunctionResponse.Response, "error"):
-					respStr = fmt.Sprintf("error: %s", stringValue(part.FunctionResponse.Response, "error"))
-				case hasString(part.FunctionResponse.Response, "content"):
-					respStr = stringValue(part.FunctionResponse.Response, "content")
-				case hasString(part.FunctionResponse.Response, "output"):
-					respStr = stringValue(part.FunctionResponse.Response, "output")
-				default:
-					if b, err := json.Marshal(part.FunctionResponse.Response); err == nil {
-						respStr = string(b)
-					}
-				}
-			}
+			respStr := functionResponseText(part.FunctionResponse.Response)
 			toolCallID := part.FunctionResponse.ID
 			if toolCallID == "" {
 				toolCallID = part.FunctionResponse.Name
@@ -617,6 +660,44 @@ func contentToOpenAIWithAliases(content *genai.Content, runtimeToOpenAI map[stri
 	return strings.Join(textParts, ""), calls, toolResponses
 }
 
+// functionResponseText converts the ADK response object to the string content
+// required by an OpenAI tool message. Prefer the standard output key, while
+// accepting the common result/response aliases used by existing tools.
+func functionResponseText(response map[string]any) string {
+	if response == nil {
+		return ""
+	}
+	if _, hasOutput := response["output"]; hasOutput {
+		if _, hasError := response["error"]; hasError {
+			return jsonValueText(response)
+		}
+	}
+
+	for _, key := range []string{"output", "result", "response", "text", "content", "error"} {
+		value, ok := response[key]
+		if !ok {
+			continue
+		}
+		if key == "error" {
+			return "error: " + jsonValueText(value)
+		}
+		return jsonValueText(value)
+	}
+
+	return jsonValueText(response)
+}
+
+func jsonValueText(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
 // openAIArgumentsMaxDepth bounds how many times a JSON string encoding of the
 // arguments is peeled. Providers that double-encode wrap once; the extra levels
 // cover a string that itself contains an encoded string without letting a
@@ -628,9 +709,7 @@ const openAIArgumentsMaxDepth = 4
 //
 // Providers disagree on the shape: some send a JSON object, some send a JSON
 // string holding that object, and some encode it twice. The value is peeled
-// repeatedly until it stops being a JSON string, then coerced into a map. A
-// non-object result is nested under a named key rather than flattened away, so
-// the executor still receives the arguments instead of an opaque wrapper.
+// repeatedly until it stops being a JSON string, then coerced into a map.
 func decodeFunctionArguments(raw json.RawMessage) (map[string]any, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -663,29 +742,9 @@ func decodeFunctionArguments(raw json.RawMessage) (map[string]any, error) {
 	switch typed := decoded.(type) {
 	case map[string]any:
 		return typed, nil
-	case nil:
-		return nil, nil
 	default:
-		// Arrays and scalars are not valid tool arguments on their own. Keep the
-		// payload reachable under a stable key instead of discarding it.
-		return map[string]any{openAIArgumentsValueKey: typed}, nil
+		return nil, fmt.Errorf("arguments must decode to a JSON object, got %T", typed)
 	}
-}
-
-// openAIArgumentsValueKey holds a decoded argument value that is not a JSON
-// object, so no argument data is lost when a provider sends an unexpected shape.
-const openAIArgumentsValueKey = "value"
-
-// hasString reports whether the map holds a string under key.
-func hasString(m map[string]any, key string) bool {
-	_, ok := m[key].(string)
-	return ok
-}
-
-// stringValue returns the string stored under key, or the empty string.
-func stringValue(m map[string]any, key string) string {
-	s, _ := m[key].(string)
-	return s
 }
 
 func contentText(content *genai.Content) string {
