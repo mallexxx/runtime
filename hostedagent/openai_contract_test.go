@@ -155,6 +155,33 @@ func TestOpenAIToolAliasesAreIdempotentForCurrentAndHistoricalCalls(t *testing.T
 	}
 }
 
+func TestOpenAIToolAliasesAvoidValidRuntimeNameCollisions(t *testing.T) {
+	const runtimeName = "balda.control.shutdown"
+	collisionName := stableOpenAIFunctionAlias(runtimeName, nil, nil)
+	cfg := &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+		FunctionDeclarations: []*genai.FunctionDeclaration{
+			{Name: runtimeName},
+			{Name: collisionName},
+		},
+	}}}
+
+	defs, _, _ := openAIToolsWithAliases(cfg)
+	if len(defs) != 2 {
+		t.Fatalf("got %d definitions, want 2", len(defs))
+	}
+	names := make(map[string]struct{}, len(defs))
+	for _, definition := range defs {
+		var function openAIFunction
+		if err := json.Unmarshal(definition.Function, &function); err != nil {
+			t.Fatalf("decode function: %v", err)
+		}
+		if _, duplicate := names[function.Name]; duplicate {
+			t.Fatalf("duplicate OpenAI function name %q", function.Name)
+		}
+		names[function.Name] = struct{}{}
+	}
+}
+
 func TestMarshalJSONSchemaPreservesEveryGenaiSchemaField(t *testing.T) {
 	maxItems, maxLength, maxProperties := int64(5), int64(6), int64(7)
 	maximum := 8.5

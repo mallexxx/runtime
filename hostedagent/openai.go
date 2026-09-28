@@ -173,8 +173,10 @@ func buildChatRequest(req *model.LLMRequest, modelName string) (openAIChatReques
 	var tools []openAIToolDefinition
 	var aliases map[string]string
 	var runtimeToOpenAI map[string]string
+	reservedNames := openAIReservedFunctionNames(nil)
 	if req != nil && req.Config != nil {
 		tools, aliases, runtimeToOpenAI = openAIToolsWithAliases(req.Config)
+		reservedNames = openAIReservedFunctionNames(req.Config)
 	}
 	if aliases == nil {
 		aliases = make(map[string]string)
@@ -183,7 +185,7 @@ func buildChatRequest(req *model.LLMRequest, modelName string) (openAIChatReques
 		runtimeToOpenAI = make(map[string]string)
 	}
 	if req != nil {
-		addHistoricalToolAliases(req.Contents, aliases, runtimeToOpenAI)
+		addHistoricalToolAliases(req.Contents, aliases, runtimeToOpenAI, reservedNames)
 	}
 
 	messages := openAIMessagesFromRequestWithAliases(req, runtimeToOpenAI)
@@ -237,11 +239,12 @@ func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefin
 	aliases := make(map[string]string)
 	runtimeToOpenAI := make(map[string]string)
 	seenRuntimeNames := make(map[string]struct{})
+	reservedNames := openAIReservedFunctionNames(cfg)
 	newAlias := func(runtimeName string) string {
 		// The alias must be stable across turns. Tool declarations can be
 		// reordered or a subset can be sent on a later turn, while the history
 		// still contains calls from earlier turns.
-		return stableOpenAIFunctionAlias(runtimeName, aliases)
+		return stableOpenAIFunctionAlias(runtimeName, aliases, reservedNames)
 	}
 
 	var defs []openAIToolDefinition
@@ -298,7 +301,36 @@ func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefin
 	return defs, aliases, runtimeToOpenAI
 }
 
-func addHistoricalToolAliases(contents []*genai.Content, aliases, runtimeToOpenAI map[string]string) {
+func openAIReservedFunctionNames(cfg *genai.GenerateContentConfig) map[string]struct{} {
+	reserved := make(map[string]struct{})
+	if cfg == nil {
+		return reserved
+	}
+	for _, tool := range cfg.Tools {
+		if tool == nil {
+			continue
+		}
+		for _, declaration := range tool.FunctionDeclarations {
+			if declaration != nil && isValidOpenAIFuncName(declaration.Name) {
+				reserved[declaration.Name] = struct{}{}
+			}
+		}
+	}
+	return reserved
+}
+
+func addHistoricalToolAliases(contents []*genai.Content, aliases, runtimeToOpenAI map[string]string, reservedNames map[string]struct{}) {
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part != nil && part.FunctionCall != nil && isValidOpenAIFuncName(part.FunctionCall.Name) {
+				reservedNames[part.FunctionCall.Name] = struct{}{}
+			}
+		}
+	}
+
 	for _, content := range contents {
 		if content == nil {
 			continue
@@ -308,8 +340,11 @@ func addHistoricalToolAliases(contents []*genai.Content, aliases, runtimeToOpenA
 				continue
 			}
 			runtimeName := part.FunctionCall.Name
+			if isValidOpenAIFuncName(runtimeName) {
+				continue
+			}
 			if !isValidOpenAIFuncName(runtimeName) {
-				alias := stableOpenAIFunctionAlias(runtimeName, aliases)
+				alias := stableOpenAIFunctionAlias(runtimeName, aliases, reservedNames)
 				aliases[alias] = runtimeName
 				runtimeToOpenAI[runtimeName] = alias
 			}
@@ -317,7 +352,7 @@ func addHistoricalToolAliases(contents []*genai.Content, aliases, runtimeToOpenA
 	}
 }
 
-func stableOpenAIFunctionAlias(runtimeName string, aliases map[string]string) string {
+func stableOpenAIFunctionAlias(runtimeName string, aliases map[string]string, reservedNames map[string]struct{}) string {
 	for salt := 0; ; salt++ {
 		seed := runtimeName
 		if salt > 0 {
@@ -325,8 +360,11 @@ func stableOpenAIFunctionAlias(runtimeName string, aliases map[string]string) st
 		}
 		digest := sha256.Sum256([]byte(seed))
 		candidate := fmt.Sprintf("runtime_tool_%x", digest[:12])
-		if mappedRuntimeName, exists := aliases[candidate]; !exists || mappedRuntimeName == runtimeName {
-			return candidate
+		_, reserved := reservedNames[candidate]
+		if !reserved {
+			if mappedRuntimeName, exists := aliases[candidate]; !exists || mappedRuntimeName == runtimeName {
+				return candidate
+			}
 		}
 	}
 }
