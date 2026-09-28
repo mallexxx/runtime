@@ -2,6 +2,7 @@ package hostedagent
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,6 +10,53 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
+
+func TestOpenAIToolAliasesRoundTripMCPAndLongNames(t *testing.T) {
+	const mcpName = "balda.control.shutdown"
+	longName := strings.Repeat("a", 65)
+	cfg := &genai.GenerateContentConfig{
+		Tools: []*genai.Tool{{
+			FunctionDeclarations: []*genai.FunctionDeclaration{
+				{Name: mcpName},
+				{Name: longName},
+			},
+		}},
+	}
+
+	defs, openAIToRuntime, runtimeToOpenAI := openAIToolsWithAliases(cfg)
+	if len(defs) != 2 {
+		t.Fatalf("tool definitions = %d, want 2", len(defs))
+	}
+	for _, original := range []string{mcpName, longName} {
+		alias := runtimeToOpenAI[original]
+		if !isValidOpenAIFuncName(alias) {
+			t.Fatalf("alias %q for %q is not OpenAI-safe", alias, original)
+		}
+		if got := openAIToRuntime[alias]; got != original {
+			t.Fatalf("alias %q resolves to %q, want %q", alias, got, original)
+		}
+	}
+
+	alias := runtimeToOpenAI[mcpName]
+	response := fmt.Sprintf(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":%q,"arguments":"{}"}}]}}]}`, alias)
+	content, err := parseChatResponseWithAliases([]byte(response), openAIToRuntime)
+	if err != nil {
+		t.Fatalf("parseChatResponseWithAliases: %v", err)
+	}
+	if got := content.Parts[0].FunctionCall.Name; got != mcpName {
+		t.Fatalf("returned function name = %q, want original MCP name %q", got, mcpName)
+	}
+
+	messages := openAIMessagesFromRequestWithAliases(&model.LLMRequest{
+		Contents: []*genai.Content{{
+			Role:  genai.RoleModel,
+			Parts: []*genai.Part{genai.NewPartFromFunctionCall(mcpName, map[string]any{})},
+		}},
+	}, runtimeToOpenAI)
+	if got := messages[0].ToolCalls[0].Function.Name; got != alias {
+		t.Fatalf("history function name = %q, want OpenAI alias %q", got, alias)
+	}
+}
 
 func TestMarshalJSONSchemaPreservesEveryGenaiSchemaField(t *testing.T) {
 	maxItems, maxLength, maxProperties := int64(5), int64(6), int64(7)

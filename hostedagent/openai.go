@@ -78,6 +78,10 @@ type openAIChatRequest struct {
 	MaxTokens   int32                  `json:"max_tokens,omitempty"`
 	Stop        []string               `json:"stop,omitempty"`
 	Tools       []openAIToolDefinition `json:"tools,omitempty"`
+
+	// toolAliases translates OpenAI-safe function names back to the runtime
+	// names expected by ADK. It is request-local and never serialized.
+	toolAliases map[string]string
 }
 
 // openAIMessage is one entry of the request "messages" array.
@@ -142,7 +146,7 @@ func (m *OpenAIModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 		return nil, err
 	}
 
-	content, err := parseChatResponse(respBody)
+	content, err := parseChatResponseWithAliases(respBody, payload.toolAliases)
 	if err != nil {
 		return nil, err
 	}
@@ -165,14 +169,22 @@ func (m *OpenAIModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 }
 
 func buildChatRequest(req *model.LLMRequest, modelName string) (openAIChatRequest, error) {
-	messages := openAIMessagesFromRequest(req)
+	var tools []openAIToolDefinition
+	var aliases map[string]string
+	var runtimeToOpenAI map[string]string
+	if req != nil && req.Config != nil {
+		tools, aliases, runtimeToOpenAI = openAIToolsWithAliases(req.Config)
+	}
+
+	messages := openAIMessagesFromRequestWithAliases(req, runtimeToOpenAI)
 	if len(messages) == 0 {
 		return openAIChatRequest{}, fmt.Errorf("openai request missing content")
 	}
 
 	payload := openAIChatRequest{
-		Model:    modelName,
-		Messages: messages,
+		Model:       modelName,
+		Messages:    messages,
+		toolAliases: aliases,
 	}
 
 	if req != nil && req.Config != nil {
@@ -189,7 +201,7 @@ func buildChatRequest(req *model.LLMRequest, modelName string) (openAIChatReques
 			payload.Stop = req.Config.StopSequences
 		}
 
-		if tools := openAIToolsFromConfig(req.Config); len(tools) > 0 {
+		if len(tools) > 0 {
 			payload.Tools = tools
 		}
 	}
@@ -198,11 +210,42 @@ func buildChatRequest(req *model.LLMRequest, modelName string) (openAIChatReques
 }
 
 // openAIToolsFromConfig converts genai tool configuration into OpenAI tool
-// definitions. Function names that do not satisfy the OpenAI pattern are
-// skipped rather than sent and rejected.
+// definitions. Names OpenAI cannot accept receive reversible aliases.
 func openAIToolsFromConfig(cfg *genai.GenerateContentConfig) []openAIToolDefinition {
+	tools, _, _ := openAIToolsWithAliases(cfg)
+	return tools
+}
+
+// openAIToolsWithAliases converts declarations and returns mappings in both
+// directions. OpenAI receives only valid names; ADK receives the original MCP
+// name when it dispatches a returned function call.
+func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefinition, map[string]string, map[string]string) {
 	if cfg == nil || len(cfg.Tools) == 0 {
-		return nil
+		return nil, nil, nil
+	}
+
+	reserved := make(map[string]bool)
+	for _, t := range cfg.Tools {
+		if t == nil {
+			continue
+		}
+		for _, fd := range t.FunctionDeclarations {
+			if fd != nil && isValidOpenAIFuncName(fd.Name) {
+				reserved[fd.Name] = true
+			}
+		}
+	}
+	aliases := make(map[string]string)
+	runtimeToOpenAI := make(map[string]string)
+	nextAlias := 1
+	newAlias := func() string {
+		for {
+			candidate := fmt.Sprintf("runtime_tool_%d", nextAlias)
+			nextAlias++
+			if !reserved[candidate] && aliases[candidate] == "" {
+				return candidate
+			}
+		}
 	}
 
 	var defs []openAIToolDefinition
@@ -215,10 +258,15 @@ func openAIToolsFromConfig(cfg *genai.GenerateContentConfig) []openAIToolDefinit
 				continue
 			}
 
-			// The OpenAI API only accepts function names matching
-			// ^[a-zA-Z0-9_-]+$.
-			if !isValidOpenAIFuncName(fd.Name) {
+			runtimeName := strings.TrimSpace(fd.Name)
+			if runtimeName == "" {
 				continue
+			}
+			openAIName := runtimeName
+			if !isValidOpenAIFuncName(runtimeName) {
+				openAIName = newAlias()
+				aliases[openAIName] = runtimeName
+				runtimeToOpenAI[runtimeName] = openAIName
 			}
 
 			params := []byte("{}")
@@ -233,7 +281,7 @@ func openAIToolsFromConfig(cfg *genai.GenerateContentConfig) []openAIToolDefinit
 			}
 
 			fn := openAIFunction{
-				Name:        fd.Name,
+				Name:        openAIName,
 				Description: fd.Description,
 				Parameters:  params,
 			}
@@ -247,7 +295,7 @@ func openAIToolsFromConfig(cfg *genai.GenerateContentConfig) []openAIToolDefinit
 			})
 		}
 	}
-	return defs
+	return defs, aliases, runtimeToOpenAI
 }
 
 // genaiSchemaTypes maps the genai schema type constants onto the JSON Schema
@@ -319,7 +367,7 @@ func normalizeGenaiSchemaTypes(schema map[string]any) {
 }
 
 // validOpenAIFuncNameRe matches the OpenAI API requirement for function names.
-var validOpenAIFuncNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+var validOpenAIFuncNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 // isValidOpenAIFuncName checks whether a function name is valid per the OpenAI
 // API spec.
@@ -362,6 +410,10 @@ func (m *OpenAIModel) doChatRequest(ctx context.Context, payload openAIChatReque
 }
 
 func parseChatResponse(respBody []byte) (*genai.Content, error) {
+	return parseChatResponseWithAliases(respBody, nil)
+}
+
+func parseChatResponseWithAliases(respBody []byte, aliases map[string]string) (*genai.Content, error) {
 	var parsed openAIChatResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return nil, fmt.Errorf("parse openai response: %w", err)
@@ -392,10 +444,14 @@ func parseChatResponse(respBody []byte) (*genai.Content, error) {
 		// call still reaches the executor instead of being dropped.
 		args := decodeFunctionArguments(tc.Function.Arguments)
 
+		name := tc.Function.Name
+		if runtimeName, ok := aliases[name]; ok {
+			name = runtimeName
+		}
 		parts = append(parts, &genai.Part{
 			FunctionCall: &genai.FunctionCall{
 				ID:   tc.ID,
-				Name: tc.Function.Name,
+				Name: name,
 				Args: args,
 			},
 		})
@@ -412,6 +468,10 @@ func parseChatResponse(respBody []byte) (*genai.Content, error) {
 }
 
 func openAIMessagesFromRequest(req *model.LLMRequest) []openAIMessage {
+	return openAIMessagesFromRequestWithAliases(req, nil)
+}
+
+func openAIMessagesFromRequestWithAliases(req *model.LLMRequest, runtimeToOpenAI map[string]string) []openAIMessage {
 	if req == nil {
 		return nil
 	}
@@ -429,7 +489,7 @@ func openAIMessagesFromRequest(req *model.LLMRequest) []openAIMessage {
 	}
 
 	for _, content := range req.Contents {
-		text, toolCalls, toolResponses := contentToOpenAI(content)
+		text, toolCalls, toolResponses := contentToOpenAIWithAliases(content, runtimeToOpenAI)
 		if text == "" && len(toolCalls) == 0 && len(toolResponses) == 0 {
 			continue
 		}
@@ -467,6 +527,10 @@ func openAIMessagesFromRequest(req *model.LLMRequest) []openAIMessage {
 // contentToOpenAI extracts text, tool calls, and tool responses from a
 // genai.Content so the full tool round trip survives in the message history.
 func contentToOpenAI(content *genai.Content) (string, []openAIToolCall, []openAIMessage) {
+	return contentToOpenAIWithAliases(content, nil)
+}
+
+func contentToOpenAIWithAliases(content *genai.Content, runtimeToOpenAI map[string]string) (string, []openAIToolCall, []openAIMessage) {
 	if content == nil {
 		return "", nil, nil
 	}
@@ -498,11 +562,15 @@ func contentToOpenAI(content *genai.Content) (string, []openAIToolCall, []openAI
 			if toolCallID == "" {
 				toolCallID = part.FunctionCall.Name
 			}
+			name := part.FunctionCall.Name
+			if alias, ok := runtimeToOpenAI[name]; ok {
+				name = alias
+			}
 			calls = append(calls, openAIToolCall{
 				ID:   toolCallID,
 				Type: openAIToolTypeFunction,
 				Function: openAIFunction{
-					Name:      part.FunctionCall.Name,
+					Name:      name,
 					Arguments: argsStrBytes,
 				},
 			})
