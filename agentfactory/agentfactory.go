@@ -290,13 +290,15 @@ var processEnv = os.Environ
 
 func hydrateMCPServerConfig(cfg agentconfig.MCPServerConfig) agentconfig.MCPServerConfig {
 	hydrated := agentconfig.MCPServerConfig{
-		Type:       cfg.Type,
-		Cmd:        append([]string(nil), cfg.Cmd...),
-		Args:       append([]string(nil), cfg.Args...),
-		Env:        cloneStringMap(cfg.Env),
-		WorkingDir: cfg.WorkingDir,
-		URL:        cfg.URL,
-		Headers:    cloneStringMap(cfg.Headers),
+		Type:           cfg.Type,
+		Cmd:            append([]string(nil), cfg.Cmd...),
+		Args:           append([]string(nil), cfg.Args...),
+		Env:            cloneStringMap(cfg.Env),
+		WorkingDir:     cfg.WorkingDir,
+		URL:            cfg.URL,
+		Headers:        cloneStringMap(cfg.Headers),
+		DedupKey:       cfg.DedupKey,
+		DedupPreferred: cfg.DedupPreferred,
 	}
 	if hydrated.Type != agentconfig.MCPServerTypeStdio {
 		return hydrated
@@ -369,8 +371,50 @@ func hostedToolsets(requestToolsets []tool.Toolset, resolvedMCP map[string]agent
 	}
 	sort.Strings(ids)
 
+	// ADK expands every toolset into one flat tool list and packing is not
+	// idempotent: two servers exposing the same tool name abort the turn with
+	// `duplicate tool`. A caller that knowingly registers one server twice
+	// (Balda registers its bundled server plus a session-scoped binding of the
+	// same endpoint) marks both entries with the same DedupKey.
+	//
+	// Equivalence is never inferred from the URL or headers: query parameters
+	// and headers can select a tenant or an authorization context, so two
+	// endpoints that differ that way are distinct servers. Only an explicit,
+	// identical, non-empty DedupKey collapses configs.
+	//
+	// Within a group the config marked DedupPreferred survives; if none is
+	// marked the lexicographically smallest id wins, so the survivor is always
+	// deterministic and independent of map iteration order.
+	keeperOf := make(map[string]string, len(ids))
+	skip := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		transport, err := mcpTransportForConfig(resolvedMCP[id])
+		key := resolvedMCP[id].DedupKey
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		keeper, ok := keeperOf[key]
+		if !ok {
+			keeperOf[key] = id
+			continue
+		}
+		if resolvedMCP[id].DedupPreferred && resolvedMCP[keeper].DedupPreferred {
+			return nil, fmt.Errorf("mcp dedup key %q has multiple preferred configs: %q and %q", key, keeper, id)
+		}
+		// A preferred entry replaces the current keeper; a preferred keeper is
+		// never displaced.
+		if resolvedMCP[id].DedupPreferred && !resolvedMCP[keeper].DedupPreferred {
+			skip[keeper] = true
+			keeperOf[key] = id
+			continue
+		}
+		skip[id] = true
+	}
+
+	for _, id := range ids {
+		if skip[id] {
+			continue
+		}
+		transport, err := mcpTransportFactory(resolvedMCP[id])
 		if err != nil {
 			return nil, fmt.Errorf("create mcp transport %q: %w", id, err)
 		}
@@ -382,6 +426,11 @@ func hostedToolsets(requestToolsets []tool.Toolset, resolvedMCP map[string]agent
 	}
 	return toolsets, nil
 }
+
+// mcpTransportFactory builds the transport for one resolved MCP server config.
+// It is a variable so tests can observe which endpoint actually survives
+// deduplication instead of re-deriving the winner with a copy of the algorithm.
+var mcpTransportFactory = mcpTransportForConfig
 
 func mcpTransportForConfig(cfg agentconfig.MCPServerConfig) (mcp.Transport, error) {
 	switch cfg.Type {

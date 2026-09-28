@@ -37,6 +37,32 @@ type MCPServerConfig struct {
 	URL string `json:"url,omitempty"         yaml:"url,omitempty"         mapstructure:"url"`
 	// Headers provides additional request headers for HTTP and SSE transports.
 	Headers map[string]string `json:"headers,omitempty"     yaml:"headers,omitempty"     mapstructure:"headers"`
+	// DedupKey marks endpoints that are known to serve the same MCP tool
+	// namespace, so only one of them may be registered with an agent.
+	//
+	// It exists because ADK flattens every toolset into a single tool map and
+	// packing is not idempotent: two servers exposing the same tool name abort
+	// the turn with `duplicate tool`. A caller that knowingly registers one
+	// server twice (for example a bundled server plus a session-scoped binding
+	// of the same endpoint) sets the same DedupKey on both entries.
+	//
+	// The key is opaque and caller-defined; the runtime never derives it from
+	// the URL or headers, because query parameters and headers can select a
+	// tenant, an authorization context, or server behavior. Endpoints are
+	// deduplicated only when both configs carry the same non-empty key, so a
+	// zero value disables deduplication entirely.
+	DedupKey string `json:"dedup_key,omitempty"   yaml:"dedup_key,omitempty"   mapstructure:"dedup_key"         validate:"omitempty,notblank"`
+	// DedupPreferred selects the survivor within a DedupKey group when the
+	// entries are not interchangeable.
+	//
+	// At most one config per DedupKey may set it. Balda needs it because its
+	// session-scoped binding carries the context token that session-memory
+	// tools require, while the plain bundled endpoint does not; keeping the
+	// plain entry would silently strip that capability.
+	//
+	// If no member of a group is marked, the lexicographically smallest id
+	// wins so the survivor stays deterministic.
+	DedupPreferred bool `json:"dedup_preferred,omitempty" yaml:"dedup_preferred,omitempty" mapstructure:"dedup_preferred"`
 }
 
 // ACPConfig is an ACP runtime configuration block used by generic and alias types.
@@ -377,6 +403,9 @@ func IsValidMCPServerType(serverType MCPServerType) bool {
 // ValidateMCPServerConfig validates an MCP server configuration.
 func ValidateMCPServerConfig(cfg MCPServerConfig) error {
 	errs := make([]string, 0)
+	if cfg.DedupPreferred && strings.TrimSpace(cfg.DedupKey) == "" {
+		errs = append(errs, "dedup_preferred requires dedup_key")
+	}
 	if err := configValidator.Struct(cfg); err != nil {
 		if invErr, ok := err.(*validator.InvalidValidationError); ok {
 			return fmt.Errorf("validate mcp server config: %w", invErr)

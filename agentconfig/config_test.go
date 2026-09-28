@@ -733,3 +733,16 @@ func TestConfigYAMLTags(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateMCPServerConfig_DedupPreferredRequiresDedupKey(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateMCPServerConfig(MCPServerConfig{
+		Type:           MCPServerTypeHTTP,
+		URL:            "http://example.test/mcp",
+		DedupPreferred: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "dedup_preferred requires dedup_key") {
+		t.Fatalf("ValidateMCPServerConfig() error = %v, want missing dedup_key error", err)
+	}
+}

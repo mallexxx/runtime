@@ -139,6 +139,11 @@ Runtime v2 uses that package internally through `agentfactory`.
 - ADK imports must use `google.golang.org/adk/v2/...`.
 - The old `github.com/normahq/runtime/acpagent` package is removed; use `github.com/normahq/go-adk-acpagent/v2`.
 - The old `providererror` package is removed.
+- `agentconfig.MCPServerConfig` gained `DedupKey` and `DedupPreferred`. Both are
+  additive and default to off. They replace the earlier behaviour where the
+  runtime collapsed MCP endpoints that shared a host and path: query parameters
+  and headers can select a tenant or an authorization context, so equivalence is
+  now declared by the caller instead of inferred from the URL.
 
 See [MIGRATION.md](MIGRATION.md) for the local consumer audit.
 

@@ -779,6 +779,64 @@ func TestFactoryBuild_OpenAIProvider(t *testing.T) {
 	}
 }
 
+// TestFactoryBuildKeepsPreferredDedupEndpoint exercises the production path
+// from registry lookup through config hydration and hosted toolset selection.
+// The session-scoped endpoint has to survive because its capability token is
+// required for the broker to inject the session context.
+func TestFactoryBuildKeepsPreferredDedupEndpoint(t *testing.T) {
+	originalModel := newOpenAIModel
+	originalHostedAgent := newHostedAgent
+	t.Cleanup(func() {
+		newOpenAIModel = originalModel
+		newHostedAgent = originalHostedAgent
+	})
+	newOpenAIModel = func(string, string) (model.LLM, error) {
+		return fakeHostedModel{name: "test-openai"}, nil
+	}
+	newHostedAgent = func(hostedagent.Config) (agent.Agent, error) {
+		return nil, nil
+	}
+
+	const endpoint = "http://127.0.0.1:34237/mcp/balda"
+	const scopedEndpoint = endpoint + "?balda_context=abc123"
+	endpoints := recordTransportEndpoints(t)
+	f := New(map[string]agentconfig.Config{
+		"openai": {
+			Type: agentconfig.AgentTypeOpenAI,
+			OpenAI: &agentconfig.LocalAPIConfig{
+				APIKey: "test-key",
+				Model:  "test-model",
+			},
+			MCPServers: []string{"balda", "balda-session"},
+		},
+	}, mcpregistry.New(map[string]agentconfig.MCPServerConfig{
+		"balda": {
+			Type:     agentconfig.MCPServerTypeHTTP,
+			URL:      endpoint,
+			DedupKey: "balda-bundled-mcp",
+		},
+		"balda-session": {
+			Type:           agentconfig.MCPServerTypeHTTP,
+			URL:            scopedEndpoint,
+			DedupKey:       "balda-bundled-mcp",
+			DedupPreferred: true,
+		},
+	}))
+
+	if _, err := f.Build(context.Background(), BuildRequest{
+		AgentID:          "openai",
+		WorkingDirectory: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(*endpoints) != 1 {
+		t.Fatalf("transport constructions = %v, want one scoped endpoint", *endpoints)
+	}
+	if got := (*endpoints)[0]; got != scopedEndpoint {
+		t.Fatalf("surviving endpoint = %q, want %q", got, scopedEndpoint)
+	}
+}
+
 func TestMCPTransportForConfig_StdioPreservesProcessConfig(t *testing.T) {
 	transport, err := mcpTransportForConfig(agentconfig.MCPServerConfig{
 		Type:       agentconfig.MCPServerTypeStdio,
