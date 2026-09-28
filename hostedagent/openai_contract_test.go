@@ -2,12 +2,72 @@ package hostedagent
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
+
+func TestMarshalJSONSchemaPreservesEveryGenaiSchemaField(t *testing.T) {
+	maxItems, maxLength, maxProperties := int64(5), int64(6), int64(7)
+	maximum := 8.5
+	minItems, minLength, minProperties := int64(1), int64(2), int64(3)
+	minimum := 4.5
+	nullable := true
+	schema := &genai.Schema{
+		AnyOf:         []*genai.Schema{{Type: genai.TypeString, Pattern: "^[a-z]+$"}},
+		Default:       map[string]any{"type": "EXAMPLE_VALUE", "enabled": true},
+		Description:   "complete schema",
+		Enum:          []string{"a", "b"},
+		Example:       map[string]any{"type": "EXAMPLE_VALUE", "name": "sample"},
+		Format:        "uuid",
+		Items:         &genai.Schema{Type: genai.TypeInteger, Minimum: &minimum},
+		MaxItems:      &maxItems,
+		MaxLength:     &maxLength,
+		MaxProperties: &maxProperties,
+		Maximum:       &maximum,
+		MinItems:      &minItems,
+		MinLength:     &minLength,
+		MinProperties: &minProperties,
+		Minimum:       &minimum,
+		Nullable:      &nullable,
+		Pattern:       "^[A-Z]+$",
+		Properties: map[string]*genai.Schema{
+			"name": {Type: genai.TypeString, Title: "Name", Pattern: ".+"},
+		},
+		PropertyOrdering: []string{"name"},
+		Required:         []string{"name"},
+		Title:            "Complete",
+		Type:             genai.TypeObject,
+	}
+
+	original, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("marshal original schema: %v", err)
+	}
+	var want map[string]any
+	if err := json.Unmarshal(original, &want); err != nil {
+		t.Fatalf("unmarshal original schema: %v", err)
+	}
+	want["type"] = schemaTypeObject
+	want["items"].(map[string]any)["type"] = schemaTypeInteger
+	want["properties"].(map[string]any)["name"].(map[string]any)["type"] = schemaTypeString
+	want["anyOf"].([]any)[0].(map[string]any)["type"] = schemaTypeString
+
+	encoded, err := marshalJSONSchema(schema)
+	if err != nil {
+		t.Fatalf("marshalJSONSchema: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatalf("unmarshal normalized schema: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized schema changed fields\n got: %#v\nwant: %#v", got, want)
+	}
+}
 
 // TestToolsSerializeLowercaseJSONSchema pins the JSON Schema type keywords sent
 // to OpenAI. genai spells its schema types in upper case ("OBJECT"), and sending

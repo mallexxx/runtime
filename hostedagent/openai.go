@@ -268,68 +268,54 @@ var genaiSchemaTypes = map[string]string{
 // expects and marshals it.
 //
 // A direct json.Marshal of genai.Schema would keep genai's own enum spelling
-// ("type":"OBJECT"), which the OpenAI API rejects, so the schema is rebuilt
-// field by field with lower-case type keywords.
+// ("type":"OBJECT"), which the OpenAI API rejects. Marshal first so every
+// schema field supported by genai survives, then normalize only the type fields
+// that belong to schema nodes.
 func marshalJSONSchema(schema *genai.Schema) ([]byte, error) {
-	return json.Marshal(jsonSchemaFromGenai(schema))
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return nil, err
+	}
+
+	var value map[string]any
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return nil, err
+	}
+	normalizeGenaiSchemaTypes(value)
+	return json.Marshal(value)
 }
 
-// jsonSchemaFromGenai rebuilds a genai.Schema as a JSON Schema value. Nested
-// schemas (properties, items) are converted recursively so their types are
-// lower-cased too.
-func jsonSchemaFromGenai(schema *genai.Schema) map[string]any {
-	if schema == nil {
-		return nil
-	}
-
-	out := make(map[string]any, 8)
-
-	if typeName := strings.ToLower(strings.TrimSpace(string(schema.Type))); typeName != "" {
-		if mapped, ok := genaiSchemaTypes[strings.ToUpper(typeName)]; ok {
-			typeName = mapped
-		}
-		if typeName != "" {
-			out["type"] = typeName
-		}
-	}
-	if strings.TrimSpace(schema.Description) != "" {
-		out["description"] = schema.Description
-	}
-	if strings.TrimSpace(schema.Format) != "" {
-		out["format"] = schema.Format
-	}
-	if len(schema.Enum) > 0 {
-		out["enum"] = append([]string(nil), schema.Enum...)
-	}
-	if len(schema.Required) > 0 {
-		out["required"] = append([]string(nil), schema.Required...)
-	}
-	if schema.Nullable != nil && *schema.Nullable {
-		out["nullable"] = true
-	}
-	if len(schema.Properties) > 0 {
-		properties := make(map[string]any, len(schema.Properties))
-		for name, property := range schema.Properties {
-			if property == nil {
-				continue
+// normalizeGenaiSchemaTypes normalizes a serialized schema in place. It walks
+// only fields whose values are themselves schemas, so an arbitrary "type" key
+// inside Default or Example data is left untouched.
+func normalizeGenaiSchemaTypes(schema map[string]any) {
+	if typeName, ok := schema["type"].(string); ok {
+		if normalized, found := genaiSchemaTypes[strings.ToUpper(strings.TrimSpace(typeName))]; found {
+			if normalized == "" {
+				delete(schema, "type")
+			} else {
+				schema["type"] = normalized
 			}
-			properties[name] = jsonSchemaFromGenai(property)
-		}
-		if len(properties) > 0 {
-			out["properties"] = properties
 		}
 	}
-	if schema.Items != nil {
-		out["items"] = jsonSchemaFromGenai(schema.Items)
-	}
 
-	// An object schema must still declare a type when the declaration omitted
-	// one, otherwise the tool parameters are not a valid JSON Schema object.
-	if _, ok := out["type"]; !ok && len(schema.Properties) > 0 {
-		out["type"] = "object"
+	if properties, ok := schema["properties"].(map[string]any); ok {
+		for _, property := range properties {
+			if nested, ok := property.(map[string]any); ok {
+				normalizeGenaiSchemaTypes(nested)
+			}
+		}
 	}
-
-	return out
+	if items, ok := schema["items"].(map[string]any); ok {
+		normalizeGenaiSchemaTypes(items)
+	}
+	if anyOf, ok := schema["anyOf"].([]any); ok {
+		for _, member := range anyOf {
+			if nested, ok := member.(map[string]any); ok {
+				normalizeGenaiSchemaTypes(nested)
+			}
+		}
+	}
 }
 
 // validOpenAIFuncNameRe matches the OpenAI API requirement for function names.
