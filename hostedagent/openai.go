@@ -176,6 +176,15 @@ func buildChatRequest(req *model.LLMRequest, modelName string) (openAIChatReques
 	if req != nil && req.Config != nil {
 		tools, aliases, runtimeToOpenAI = openAIToolsWithAliases(req.Config)
 	}
+	if aliases == nil {
+		aliases = make(map[string]string)
+	}
+	if runtimeToOpenAI == nil {
+		runtimeToOpenAI = make(map[string]string)
+	}
+	if req != nil {
+		addHistoricalToolAliases(req.Contents, aliases, runtimeToOpenAI)
+	}
 
 	messages := openAIMessagesFromRequestWithAliases(req, runtimeToOpenAI)
 	if len(messages) == 0 {
@@ -225,17 +234,6 @@ func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefin
 		return nil, nil, nil
 	}
 
-	reserved := make(map[string]bool)
-	for _, t := range cfg.Tools {
-		if t == nil {
-			continue
-		}
-		for _, fd := range t.FunctionDeclarations {
-			if fd != nil && isValidOpenAIFuncName(fd.Name) {
-				reserved[fd.Name] = true
-			}
-		}
-	}
 	aliases := make(map[string]string)
 	runtimeToOpenAI := make(map[string]string)
 	seenRuntimeNames := make(map[string]struct{})
@@ -243,17 +241,7 @@ func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefin
 		// The alias must be stable across turns. Tool declarations can be
 		// reordered or a subset can be sent on a later turn, while the history
 		// still contains calls from earlier turns.
-		for salt := 0; ; salt++ {
-			seed := runtimeName
-			if salt > 0 {
-				seed = fmt.Sprintf("%s#%d", runtimeName, salt)
-			}
-			digest := sha256.Sum256([]byte(seed))
-			candidate := fmt.Sprintf("runtime_tool_%x", digest[:12])
-			if !reserved[candidate] && aliases[candidate] == "" {
-				return candidate
-			}
-		}
+		return stableOpenAIFunctionAlias(runtimeName, aliases)
 	}
 
 	var defs []openAIToolDefinition
@@ -308,6 +296,39 @@ func openAIToolsWithAliases(cfg *genai.GenerateContentConfig) ([]openAIToolDefin
 		}
 	}
 	return defs, aliases, runtimeToOpenAI
+}
+
+func addHistoricalToolAliases(contents []*genai.Content, aliases, runtimeToOpenAI map[string]string) {
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part == nil || part.FunctionCall == nil {
+				continue
+			}
+			runtimeName := part.FunctionCall.Name
+			if !isValidOpenAIFuncName(runtimeName) {
+				alias := stableOpenAIFunctionAlias(runtimeName, aliases)
+				aliases[alias] = runtimeName
+				runtimeToOpenAI[runtimeName] = alias
+			}
+		}
+	}
+}
+
+func stableOpenAIFunctionAlias(runtimeName string, aliases map[string]string) string {
+	for salt := 0; ; salt++ {
+		seed := runtimeName
+		if salt > 0 {
+			seed = fmt.Sprintf("%s#%d", runtimeName, salt)
+		}
+		digest := sha256.Sum256([]byte(seed))
+		candidate := fmt.Sprintf("runtime_tool_%x", digest[:12])
+		if aliases[candidate] == "" {
+			return candidate
+		}
+	}
 }
 
 // genaiSchemaTypes maps the genai schema type constants onto the JSON Schema
@@ -608,6 +629,11 @@ func functionResponseText(response map[string]any) string {
 	if response == nil {
 		return ""
 	}
+	if _, hasOutput := response["output"]; hasOutput {
+		if _, hasError := response["error"]; hasError {
+			return jsonValueText(response)
+		}
+	}
 
 	for _, key := range []string{"output", "result", "response", "text", "content", "error"} {
 		value, ok := response[key]
@@ -645,9 +671,7 @@ const openAIArgumentsMaxDepth = 4
 //
 // Providers disagree on the shape: some send a JSON object, some send a JSON
 // string holding that object, and some encode it twice. The value is peeled
-// repeatedly until it stops being a JSON string, then coerced into a map. A
-// non-object result is nested under a named key rather than flattened away, so
-// the executor still receives the arguments instead of an opaque wrapper.
+// repeatedly until it stops being a JSON string, then coerced into a map.
 func decodeFunctionArguments(raw json.RawMessage) (map[string]any, error) {
 	if len(raw) == 0 {
 		return nil, nil

@@ -106,6 +106,28 @@ func TestOpenAIToolAliasesAreStableWhenDeclarationsChangeOrder(t *testing.T) {
 	}
 }
 
+func TestOpenAIToolAliasesCoverHistoricalToolsMissingFromCurrentConfig(t *testing.T) {
+	const historicalName = "balda.control.shutdown"
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{
+			Role:  genai.RoleModel,
+			Parts: []*genai.Part{genai.NewPartFromFunctionCall(historicalName, map[string]any{})},
+		}, genai.NewContentFromText("continue", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+			FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "current_tool"}},
+		}}},
+	}
+
+	payload, err := buildChatRequest(req, "test-model")
+	if err != nil {
+		t.Fatalf("buildChatRequest: %v", err)
+	}
+	alias := payload.Messages[0].ToolCalls[0].Function.Name
+	if alias == historicalName || !isValidOpenAIFuncName(alias) {
+		t.Fatalf("historical tool name = %q, want stable OpenAI-safe alias", alias)
+	}
+}
+
 func TestMarshalJSONSchemaPreservesEveryGenaiSchemaField(t *testing.T) {
 	maxItems, maxLength, maxProperties := int64(5), int64(6), int64(7)
 	maximum := 8.5
@@ -466,6 +488,16 @@ func TestFunctionResponseTextPrefersOutputAndPreservesValues(t *testing.T) {
 	}
 	if got := functionResponseText(response); got != `{"ok":true}` {
 		t.Fatalf("functionResponseText() = %q, want structured output", got)
+	}
+}
+
+func TestFunctionResponseTextPreservesOutputAndError(t *testing.T) {
+	response := map[string]any{
+		"output": "partial",
+		"error":  "failed",
+	}
+	if got := functionResponseText(response); got != `{"error":"failed","output":"partial"}` {
+		t.Fatalf("functionResponseText() = %q, want output and error", got)
 	}
 }
 
