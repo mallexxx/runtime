@@ -403,6 +403,9 @@ func IsValidMCPServerType(serverType MCPServerType) bool {
 // ValidateMCPServerConfig validates an MCP server configuration.
 func ValidateMCPServerConfig(cfg MCPServerConfig) error {
 	errs := make([]string, 0)
+	if cfg.DedupPreferred && strings.TrimSpace(cfg.DedupKey) == "" {
+		errs = append(errs, "dedup_preferred requires dedup_key")
+	}
 	if err := configValidator.Struct(cfg); err != nil {
 		if invErr, ok := err.(*validator.InvalidValidationError); ok {
 			return fmt.Errorf("validate mcp server config: %w", invErr)
