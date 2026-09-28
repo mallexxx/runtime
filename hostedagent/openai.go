@@ -325,7 +325,7 @@ func stableOpenAIFunctionAlias(runtimeName string, aliases map[string]string) st
 		}
 		digest := sha256.Sum256([]byte(seed))
 		candidate := fmt.Sprintf("runtime_tool_%x", digest[:12])
-		if aliases[candidate] == "" {
+		if mappedRuntimeName, exists := aliases[candidate]; !exists || mappedRuntimeName == runtimeName {
 			return candidate
 		}
 	}

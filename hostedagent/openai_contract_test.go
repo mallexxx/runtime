@@ -128,6 +128,33 @@ func TestOpenAIToolAliasesCoverHistoricalToolsMissingFromCurrentConfig(t *testin
 	}
 }
 
+func TestOpenAIToolAliasesAreIdempotentForCurrentAndHistoricalCalls(t *testing.T) {
+	const toolName = "balda.control.shutdown"
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{
+			Role:  genai.RoleModel,
+			Parts: []*genai.Part{genai.NewPartFromFunctionCall(toolName, map[string]any{})},
+		}, genai.NewContentFromText("continue", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{
+			FunctionDeclarations: []*genai.FunctionDeclaration{{Name: toolName}},
+		}}},
+	}
+
+	payload, err := buildChatRequest(req, "test-model")
+	if err != nil {
+		t.Fatalf("buildChatRequest: %v", err)
+	}
+	declared := payload.Tools[0].Function
+	var declaration openAIFunction
+	if err := json.Unmarshal(declared, &declaration); err != nil {
+		t.Fatalf("decode declaration: %v", err)
+	}
+	historical := payload.Messages[0].ToolCalls[0].Function.Name
+	if historical != declaration.Name {
+		t.Fatalf("historical alias = %q, declaration alias = %q", historical, declaration.Name)
+	}
+}
+
 func TestMarshalJSONSchemaPreservesEveryGenaiSchemaField(t *testing.T) {
 	maxItems, maxLength, maxProperties := int64(5), int64(6), int64(7)
 	maximum := 8.5
