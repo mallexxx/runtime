@@ -363,7 +363,10 @@ func TestArgumentsUnwrapRepeatedEncoding(t *testing.T) {
 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			got := decodeFunctionArguments(json.RawMessage(testCase.raw))
+			got, err := decodeFunctionArguments(json.RawMessage(testCase.raw))
+			if err != nil {
+				t.Fatalf("decodeFunctionArguments(%s): %v", testCase.raw, err)
+			}
 			gotJSON, err := json.Marshal(got)
 			if err != nil {
 				t.Fatalf("marshal args: %v", err)
@@ -395,7 +398,10 @@ func TestArgumentsUnwrapIsBounded(t *testing.T) {
 		nested = string(encoded)
 	}
 
-	got := decodeFunctionArguments(json.RawMessage(nested))
+	got, err := decodeFunctionArguments(json.RawMessage(nested))
+	if err != nil {
+		t.Fatalf("decodeFunctionArguments: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected a non-nil map for a deeply nested payload")
 	}
@@ -406,7 +412,18 @@ func TestArgumentsUnwrapIsBounded(t *testing.T) {
 
 // TestArgumentsUnwrapEmpty covers the absent-arguments case.
 func TestArgumentsUnwrapEmpty(t *testing.T) {
-	if got := decodeFunctionArguments(nil); got != nil {
+	got, err := decodeFunctionArguments(nil)
+	if err != nil {
+		t.Fatalf("decodeFunctionArguments(nil): %v", err)
+	}
+	if got != nil {
 		t.Fatalf("expected nil for empty arguments, got %v", got)
+	}
+}
+
+func TestParseChatResponseRejectsInvalidToolArguments(t *testing.T) {
+	resp := `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"list_vaults","arguments":not-json}}]}}]}`
+	if _, err := parseChatResponse([]byte(resp)); err == nil {
+		t.Fatal("expected invalid tool arguments to fail")
 	}
 }

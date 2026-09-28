@@ -439,10 +439,12 @@ func parseChatResponseWithAliases(respBody []byte, aliases map[string]string) (*
 
 		// OpenAI-compatible providers return arguments as a JSON string.
 		// Some (DeepSeek) return it doubly encoded: the RawMessage holds a
-		// JSON string whose value is the JSON object. Try the string form
-		// first, then the object form, and fall back to a raw wrapper so the
-		// call still reaches the executor instead of being dropped.
-		args := decodeFunctionArguments(tc.Function.Arguments)
+		// JSON string whose value is the JSON object. Decode both forms, but
+		// reject malformed JSON rather than dispatching an incomplete call.
+		args, err := decodeFunctionArguments(tc.Function.Arguments)
+		if err != nil {
+			return nil, fmt.Errorf("decode tool call %q arguments: %w", tc.ID, err)
+		}
 
 		name := tc.Function.Name
 		if runtimeName, ok := aliases[name]; ok {
@@ -629,21 +631,27 @@ const openAIArgumentsMaxDepth = 4
 // repeatedly until it stops being a JSON string, then coerced into a map. A
 // non-object result is nested under a named key rather than flattened away, so
 // the executor still receives the arguments instead of an opaque wrapper.
-func decodeFunctionArguments(raw json.RawMessage) map[string]any {
+func decodeFunctionArguments(raw json.RawMessage) (map[string]any, error) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	value := raw
 	var decoded any
 	for depth := 0; depth < openAIArgumentsMaxDepth; depth++ {
 		if err := json.Unmarshal(value, &decoded); err != nil {
-			break
+			return nil, fmt.Errorf("invalid JSON: %w", err)
 		}
 		// A JSON string may itself hold more JSON: unwrap and try again.
 		if asString, ok := decoded.(string); ok {
 			trimmed := strings.TrimSpace(asString)
 			if trimmed == "" {
+				break
+			}
+			// A scalar string is valid argument data too. Only peel it when
+			// its contents are themselves valid JSON.
+			var nested any
+			if err := json.Unmarshal([]byte(trimmed), &nested); err != nil {
 				break
 			}
 			value = json.RawMessage(trimmed)
@@ -654,13 +662,13 @@ func decodeFunctionArguments(raw json.RawMessage) map[string]any {
 
 	switch typed := decoded.(type) {
 	case map[string]any:
-		return typed
+		return typed, nil
 	case nil:
-		return nil
+		return nil, nil
 	default:
 		// Arrays and scalars are not valid tool arguments on their own. Keep the
 		// payload reachable under a stable key instead of discarding it.
-		return map[string]any{openAIArgumentsValueKey: typed}
+		return map[string]any{openAIArgumentsValueKey: typed}, nil
 	}
 }
 
