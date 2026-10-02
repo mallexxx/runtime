@@ -86,7 +86,7 @@ func main() {
 		"codex": {
 			Type: agentconfig.AgentTypeCodexACP,
 			CodexACP: &agentconfig.ACPConfig{
-				BridgeVersion: "1.7.3",
+				BridgeVersion: "1.10.1",
 			},
 		},
 	}
@@ -103,7 +103,9 @@ func main() {
 ```
 
 For `codex_acp`, `bridge_version` accepts an npm version or dist-tag for
-`@normahq/codex-acp-bridge`; empty defaults to the tested `1.7.3` release.
+the canonical [`codex-acp`](https://github.com/baldaworks/codex-acp) package;
+empty defaults to the tested `1.10.1` release. The configuration field keeps
+its existing name for compatibility.
 
 `registry_acp` allows running any agent from the official [ACP Registry](https://agentclientprotocol.com)
 by specifying `registry_id` (e.g. `amp-acp`, `cline`, `auggie`, `codebuddy`, `claude-acp`, etc.).

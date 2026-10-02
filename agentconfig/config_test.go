@@ -8,11 +8,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestCodexACPBridgePackageUsesPinnedDefault(t *testing.T) {
+func TestCodexACPPackageUsesPinnedDefault(t *testing.T) {
 	t.Parallel()
 
-	if got, want := codexACPBridgePackage(""), "@normahq/codex-acp-bridge@1.7.3"; got != want {
-		t.Fatalf("codexACPBridgePackage(\"\") = %q, want %q", got, want)
+	if got, want := codexACPPackage(""), "codex-acp@1.10.1"; got != want {
+		t.Fatalf("codexACPPackage(\"\") = %q, want %q", got, want)
 	}
 }
 
@@ -289,7 +289,7 @@ func TestNormalizeConfig(t *testing.T) {
 			exec: execPath,
 			want: ResolvedConfig{
 				Type:            AgentTypeGenericACP,
-				Command:         []string{"npx", "-y", codexACPBridgePackage(""), "--trace"},
+				Command:         []string{"npx", "-y", codexACPPackage(""), "--trace"},
 				Model:           "gpt-5-codex",
 				Mode:            "code",
 				ReasoningEffort: "high",
@@ -307,7 +307,7 @@ func TestNormalizeConfig(t *testing.T) {
 			exec: execPath,
 			want: ResolvedConfig{
 				Type:    AgentTypeGenericACP,
-				Command: []string{"npx", "-y", "@normahq/codex-acp-bridge@1.6.5", "--trace"},
+				Command: []string{"npx", "-y", "codex-acp@1.6.5", "--trace"},
 			},
 		},
 		{
@@ -674,8 +674,8 @@ func TestNormalizeConfigs(t *testing.T) {
 	if checkCfg.Type != AgentTypeGenericACP {
 		t.Fatalf("check type = %q, want %q", checkCfg.Type, AgentTypeGenericACP)
 	}
-	if len(checkCfg.Command) < 3 || checkCfg.Command[0] != "npx" || checkCfg.Command[1] != "-y" || checkCfg.Command[2] != codexACPBridgePackage("") {
-		t.Fatalf("check command = %v, want npx -y %s", checkCfg.Command, codexACPBridgePackage(""))
+	if len(checkCfg.Command) < 3 || checkCfg.Command[0] != "npx" || checkCfg.Command[1] != "-y" || checkCfg.Command[2] != codexACPPackage("") {
+		t.Fatalf("check command = %v, want npx -y %s", checkCfg.Command, codexACPPackage(""))
 	}
 
 	actCfg := got["act"]
