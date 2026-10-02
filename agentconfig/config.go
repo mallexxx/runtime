@@ -81,19 +81,19 @@ type ACPConfig struct {
 	ReasoningEffortConfigID string `json:"reasoning_effort_config_id,omitempty" yaml:"reasoning_effort_config_id,omitempty" mapstructure:"reasoning_effort_config_id" validate:"omitempty,notblank"`
 	// Mode selects the runtime session mode when the backend supports it.
 	Mode string `json:"mode,omitempty"       yaml:"mode,omitempty"       mapstructure:"mode"       validate:"omitempty,notblank"`
-	// BridgeVersion selects the Codex ACP bridge npm version or dist-tag.
+	// BridgeVersion selects the Codex ACP npm version or dist-tag.
 	BridgeVersion string `json:"bridge_version,omitempty" yaml:"bridge_version,omitempty" mapstructure:"bridge_version" validate:"omitempty,notblank"`
 	// RegistryID selects the agent identifier within the ACP Registry.
 	RegistryID string `json:"registry_id,omitempty" yaml:"registry_id,omitempty" mapstructure:"registry_id" validate:"omitempty,notblank"`
 }
 
 const (
-	codexACPBridgePackageName    = "@normahq/codex-acp-bridge"
-	defaultCodexACPBridgeVersion = "1.7.3"
-	acpRunPackageName            = "@baldaworks/acprun"
-	defaultACPRunVersion         = "0.1.6"
-	npxCommand                   = "npx"
-	npxYesFlag                   = "-y"
+	codexACPPackageName    = "codex-acp"
+	defaultCodexACPVersion = "1.10.1"
+	acpRunPackageName      = "@baldaworks/acprun"
+	defaultACPRunVersion   = "0.1.6"
+	npxCommand             = "npx"
+	npxYesFlag             = "-y"
 )
 
 func acpRunPackage(version string) string {
@@ -660,7 +660,7 @@ func NormalizeConfig(cfg Config, executablePath string) (ResolvedConfig, error) 
 			return ResolvedConfig{}, fmt.Errorf("codex_acp block is required")
 		}
 		return resolveACPConfig(resolved, AgentTypeGenericACP, ACPConfig{
-			Cmd:                     commandOrDefault(cfg.CodexACP.Cmd, []string{npxCommand, npxYesFlag, codexACPBridgePackage(cfg.CodexACP.BridgeVersion)}),
+			Cmd:                     commandOrDefault(cfg.CodexACP.Cmd, []string{npxCommand, npxYesFlag, codexACPPackage(cfg.CodexACP.BridgeVersion)}),
 			ExtraArgs:               append([]string(nil), cfg.CodexACP.ExtraArgs...),
 			Model:                   cfg.CodexACP.Model,
 			ModelConfigID:           cfg.CodexACP.ModelConfigID,
@@ -827,12 +827,12 @@ func commandOrDefault(command, fallback []string) []string {
 	return append([]string(nil), fallback...)
 }
 
-func codexACPBridgePackage(version string) string {
+func codexACPPackage(version string) string {
 	version = strings.TrimPrefix(strings.TrimSpace(version), "@")
 	if version == "" {
-		version = defaultCodexACPBridgeVersion
+		version = defaultCodexACPVersion
 	}
-	return codexACPBridgePackageName + "@" + version
+	return codexACPPackageName + "@" + version
 }
 
 func appendGeminiModelFlag(cmd []string, model string) []string {
