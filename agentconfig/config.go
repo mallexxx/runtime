@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -110,6 +111,10 @@ type LocalAPIConfig struct {
 	APIKey string `json:"api_key,omitempty" yaml:"api_key,omitempty" mapstructure:"api_key"`
 	// Model selects the hosted provider model identifier.
 	Model string `json:"model,omitempty"   yaml:"model,omitempty"   mapstructure:"model"   validate:"omitempty,notblank"`
+	// Timeout limits one HTTP request to the hosted provider.
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" mapstructure:"timeout"`
+	// Thinking selects the OpenAI-compatible thinking mode when supported.
+	Thinking string `json:"thinking,omitempty" yaml:"thinking,omitempty" mapstructure:"thinking" validate:"omitempty,oneof=enabled disabled"`
 }
 
 // PoolConfig is the pool runtime configuration block.
@@ -182,6 +187,10 @@ type ResolvedConfig struct {
 	APIKey string
 	// Model is the resolved runtime model identifier.
 	Model string
+	// Timeout limits one hosted-provider HTTP request. Zero uses the default.
+	Timeout time.Duration
+	// Thinking is the configured OpenAI-compatible thinking mode.
+	Thinking string
 	// Mode is the resolved runtime mode identifier.
 	Mode string
 	// PoolMembers are the resolved provider IDs in pool failover order.
@@ -757,6 +766,12 @@ func NormalizeConfig(cfg Config, executablePath string) (ResolvedConfig, error) 
 		resolved.Type = AgentTypeOpenAI
 		resolved.APIKey = cfg.OpenAI.APIKey
 		resolved.Model = cfg.OpenAI.Model
+		timeout, err := parseOpenAITimeout(cfg.OpenAI.Timeout)
+		if err != nil {
+			return ResolvedConfig{}, err
+		}
+		resolved.Timeout = timeout
+		resolved.Thinking = cfg.OpenAI.Thinking
 		return resolved, nil
 	case AgentTypeAIStudio:
 		if cfg.AIStudio == nil {
@@ -896,8 +911,29 @@ func validateAgentConfigSemantics(cfg Config) error {
 	if canonicalAgentType(cfg.Type) == AgentTypeGeminiACP {
 		return fmt.Errorf("%s is deprecated and no longer supported", AgentTypeGeminiACP)
 	}
+	if canonicalAgentType(cfg.Type) == AgentTypeOpenAI && cfg.OpenAI != nil {
+		if _, err := parseOpenAITimeout(cfg.OpenAI.Timeout); err != nil {
+			return err
+		}
+		switch cfg.OpenAI.Thinking {
+		case "", "enabled", "disabled":
+		default:
+			return fmt.Errorf("openai.thinking must be enabled or disabled: %q", cfg.OpenAI.Thinking)
+		}
+	}
 
 	return nil
+}
+
+func parseOpenAITimeout(value string) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		return 0, fmt.Errorf("openai.timeout must be a positive duration: %q", value)
+	}
+	return timeout, nil
 }
 
 func canonicalAgentType(agentType string) string {

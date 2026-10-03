@@ -37,6 +37,27 @@ go get github.com/normahq/runtime/v2
 
 ## Usage
 
+### OpenAI-compatible request options
+
+OpenAI-compatible providers use a 30-second HTTP request timeout by default. Set
+`runtime.providers.<name>.openai.timeout` to a positive Go duration when a
+provider needs longer requests:
+
+```yaml
+runtime:
+  providers:
+    deepseek:
+      type: openai
+      openai:
+        api_key: ${DEEPSEEK_API_KEY}
+        model: deepseek-v4-pro
+        timeout: 180s
+        thinking: disabled
+```
+
+`thinking` is omitted by default. Set it to `enabled` or `disabled` only for
+providers that accept the OpenAI-compatible `thinking.type` field.
+
 ### Validate runtime settings
 
 ```go
