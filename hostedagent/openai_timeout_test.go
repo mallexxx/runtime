@@ -31,6 +31,9 @@ func TestOpenAIModelTimeout(t *testing.T) {
 	if _, err := NewOpenAIModelWithTimeout("key", "model", 0); err == nil {
 		t.Fatal("zero timeout accepted")
 	}
+	if _, err := NewOpenAIModelWithOptions("key", "model", OpenAIModelOptions{Thinking: "enabled"}); err == nil {
+		t.Fatal("enabled thinking accepted without reasoning-content round trip")
+	}
 }
 
 func TestOpenAIModelThinkingWire(t *testing.T) {

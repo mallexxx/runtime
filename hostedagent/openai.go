@@ -151,9 +151,9 @@ func NewOpenAIModelWithOptions(apiKey, modelName string, opts OpenAIModelOptions
 		return nil, fmt.Errorf("openai timeout must be positive")
 	}
 	switch opts.Thinking {
-	case "", "enabled", "disabled":
+	case "", "disabled":
 	default:
-		return nil, fmt.Errorf("openai thinking must be enabled or disabled")
+		return nil, fmt.Errorf("openai thinking currently supports only disabled")
 	}
 	return &OpenAIModel{
 		name:     modelName,

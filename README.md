@@ -55,8 +55,9 @@ runtime:
         thinking: disabled
 ```
 
-`thinking` is omitted by default. Set it to `enabled` or `disabled` only for
-providers that accept the OpenAI-compatible `thinking.type` field.
+`thinking` is omitted by default. Only `disabled` is currently supported, and
+only providers that accept the OpenAI-compatible `thinking.type` field should
+set it. Enabled thinking requires reasoning content to survive tool-call turns.
 
 ### Validate runtime settings
 

@@ -36,7 +36,7 @@ func TestOpenAIThinkingNormalization(t *testing.T) {
 		cfg := Config{Type: AgentTypeOpenAI, OpenAI: &LocalAPIConfig{APIKey: "key", Model: "model", Thinking: thinking}}
 		got, normalizeErr := NormalizeConfig(cfg, "")
 		validateErr := cfg.Validate()
-		if thinking == "automatic" {
+		if thinking == "automatic" || thinking == "enabled" {
 			if normalizeErr == nil || validateErr == nil {
 				t.Fatalf("invalid thinking %q accepted", thinking)
 			}

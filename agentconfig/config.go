@@ -114,7 +114,7 @@ type LocalAPIConfig struct {
 	// Timeout limits one HTTP request to the hosted provider.
 	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" mapstructure:"timeout"`
 	// Thinking selects the OpenAI-compatible thinking mode when supported.
-	Thinking string `json:"thinking,omitempty" yaml:"thinking,omitempty" mapstructure:"thinking" validate:"omitempty,oneof=enabled disabled"`
+	Thinking string `json:"thinking,omitempty" yaml:"thinking,omitempty" mapstructure:"thinking" validate:"omitempty,oneof=disabled"`
 }
 
 // PoolConfig is the pool runtime configuration block.
@@ -916,9 +916,9 @@ func validateAgentConfigSemantics(cfg Config) error {
 			return err
 		}
 		switch cfg.OpenAI.Thinking {
-		case "", "enabled", "disabled":
+		case "", "disabled":
 		default:
-			return fmt.Errorf("openai.thinking must be enabled or disabled: %q", cfg.OpenAI.Thinking)
+			return fmt.Errorf("openai.thinking currently supports only disabled: %q", cfg.OpenAI.Thinking)
 		}
 	}
 
