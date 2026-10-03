@@ -3,7 +3,11 @@ package agentconfig
 import (
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+const testReasoningEffortNone = "none"
 
 func TestOpenAITimeoutNormalization(t *testing.T) {
 	for _, tc := range []struct {
@@ -31,19 +35,29 @@ func TestOpenAITimeoutNormalization(t *testing.T) {
 	}
 }
 
-func TestOpenAIThinkingNormalization(t *testing.T) {
-	for _, thinking := range []string{"", "enabled", "disabled", "automatic"} {
-		cfg := Config{Type: AgentTypeOpenAI, OpenAI: &LocalAPIConfig{APIKey: "key", Model: "model", Thinking: thinking}}
+func TestOpenAIReasoningEffortYAMLField(t *testing.T) {
+	var cfg Config
+	if err := yaml.Unmarshal([]byte("type: openai\nopenai:\n  api_key: key\n  model: model\n  reasoning_effort: none\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenAI == nil || cfg.OpenAI.ReasoningEffort != testReasoningEffortNone {
+		t.Fatalf("openai.reasoning_effort = %+v", cfg.OpenAI)
+	}
+}
+
+func TestOpenAIReasoningEffortNormalization(t *testing.T) {
+	for _, reasoningEffort := range []string{"", testReasoningEffortNone, "low", "enabled"} {
+		cfg := Config{Type: AgentTypeOpenAI, OpenAI: &LocalAPIConfig{APIKey: "key", Model: "model", ReasoningEffort: reasoningEffort}}
 		got, normalizeErr := NormalizeConfig(cfg, "")
 		validateErr := cfg.Validate()
-		if thinking == "automatic" || thinking == "enabled" {
+		if reasoningEffort != "" && reasoningEffort != testReasoningEffortNone {
 			if normalizeErr == nil || validateErr == nil {
-				t.Fatalf("invalid thinking %q accepted", thinking)
+				t.Fatalf("invalid reasoning_effort %q accepted", reasoningEffort)
 			}
 			continue
 		}
-		if normalizeErr != nil || validateErr != nil || got.Thinking != thinking {
-			t.Fatalf("thinking %q: got %q, normalize=%v, validate=%v", thinking, got.Thinking, normalizeErr, validateErr)
+		if normalizeErr != nil || validateErr != nil || got.ReasoningEffort != reasoningEffort {
+			t.Fatalf("reasoning_effort %q: got %q, normalize=%v, validate=%v", reasoningEffort, got.ReasoningEffort, normalizeErr, validateErr)
 		}
 	}
 }

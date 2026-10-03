@@ -44,18 +44,18 @@ func openAIBaseURL() string {
 // OpenAIModel adapts the OpenAI chat completions API to the ADK model
 // interface.
 type OpenAIModel struct {
-	name     string
-	apiKey   string
-	client   *http.Client
-	thinking string
+	name            string
+	apiKey          string
+	client          *http.Client
+	reasoningEffort string
 }
 
 // OpenAIModelOptions controls optional OpenAI-compatible request behavior.
 type OpenAIModelOptions struct {
 	// Timeout defaults to 30 seconds when zero.
 	Timeout time.Duration
-	// Thinking is omitted when empty.
-	Thinking string
+	// ReasoningEffort is omitted when empty. Only "none" is supported.
+	ReasoningEffort string
 }
 
 // openAIToolDefinition is one entry of the request "tools" array.
@@ -150,16 +150,16 @@ func NewOpenAIModelWithOptions(apiKey, modelName string, opts OpenAIModelOptions
 	if timeout < 0 {
 		return nil, fmt.Errorf("openai timeout must be positive")
 	}
-	switch opts.Thinking {
-	case "", "disabled":
+	switch opts.ReasoningEffort {
+	case "", "none":
 	default:
-		return nil, fmt.Errorf("openai thinking currently supports only disabled")
+		return nil, fmt.Errorf("openai reasoning_effort currently supports only none")
 	}
 	return &OpenAIModel{
-		name:     modelName,
-		apiKey:   apiKey,
-		client:   &http.Client{Timeout: timeout},
-		thinking: opts.Thinking,
+		name:            modelName,
+		apiKey:          apiKey,
+		client:          &http.Client{Timeout: timeout},
+		reasoningEffort: opts.ReasoningEffort,
 	}, nil
 }
 
@@ -181,8 +181,8 @@ func (m *OpenAIModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 	if err != nil {
 		return nil, err
 	}
-	if m.thinking != "" {
-		payload.Thinking = &openAIThinking{Type: m.thinking}
+	if m.reasoningEffort == "none" {
+		payload.Thinking = &openAIThinking{Type: "disabled"}
 	}
 
 	respBody, err := m.doChatRequest(ctx, payload)

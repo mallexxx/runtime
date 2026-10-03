@@ -113,8 +113,8 @@ type LocalAPIConfig struct {
 	Model string `json:"model,omitempty"   yaml:"model,omitempty"   mapstructure:"model"   validate:"omitempty,notblank"`
 	// Timeout limits one HTTP request to the hosted provider.
 	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" mapstructure:"timeout"`
-	// Thinking selects the OpenAI-compatible thinking mode when supported.
-	Thinking string `json:"thinking,omitempty" yaml:"thinking,omitempty" mapstructure:"thinking" validate:"omitempty,oneof=disabled"`
+	// ReasoningEffort selects the hosted provider reasoning effort when supported.
+	ReasoningEffort string `json:"reasoning_effort,omitempty" yaml:"reasoning_effort,omitempty" mapstructure:"reasoning_effort" validate:"omitempty,oneof=none"`
 }
 
 // PoolConfig is the pool runtime configuration block.
@@ -189,8 +189,6 @@ type ResolvedConfig struct {
 	Model string
 	// Timeout limits one hosted-provider HTTP request. Zero uses the default.
 	Timeout time.Duration
-	// Thinking is the configured OpenAI-compatible thinking mode.
-	Thinking string
 	// Mode is the resolved runtime mode identifier.
 	Mode string
 	// PoolMembers are the resolved provider IDs in pool failover order.
@@ -771,7 +769,7 @@ func NormalizeConfig(cfg Config, executablePath string) (ResolvedConfig, error) 
 			return ResolvedConfig{}, err
 		}
 		resolved.Timeout = timeout
-		resolved.Thinking = cfg.OpenAI.Thinking
+		resolved.ReasoningEffort = cfg.OpenAI.ReasoningEffort
 		return resolved, nil
 	case AgentTypeAIStudio:
 		if cfg.AIStudio == nil {
@@ -915,10 +913,10 @@ func validateAgentConfigSemantics(cfg Config) error {
 		if _, err := parseOpenAITimeout(cfg.OpenAI.Timeout); err != nil {
 			return err
 		}
-		switch cfg.OpenAI.Thinking {
-		case "", "disabled":
+		switch cfg.OpenAI.ReasoningEffort {
+		case "", "none":
 		default:
-			return fmt.Errorf("openai.thinking currently supports only disabled: %q", cfg.OpenAI.Thinking)
+			return fmt.Errorf("openai.reasoning_effort currently supports only none: %q", cfg.OpenAI.ReasoningEffort)
 		}
 	}
 

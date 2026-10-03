@@ -543,9 +543,9 @@ func newHostedAgentDefault(cfg hostedagent.Config) (agent.Agent, error) {
 	return hostedagent.New(cfg)
 }
 
-func newOpenAIModelDefault(apiKey, modelName string, timeout time.Duration, thinking string) (model.LLM, error) {
+func newOpenAIModelDefault(apiKey, modelName string, timeout time.Duration, reasoningEffort string) (model.LLM, error) {
 	return hostedagent.NewOpenAIModelWithOptions(apiKey, modelName, hostedagent.OpenAIModelOptions{
-		Timeout: timeout, Thinking: thinking,
+		Timeout: timeout, ReasoningEffort: reasoningEffort,
 	})
 }
 
@@ -688,7 +688,7 @@ var openAIConstructor = func(ctx context.Context, cfg agentconfig.ResolvedConfig
 	if cfg.Type != agentconfig.AgentTypeOpenAI {
 		return nil, fmt.Errorf("unknown openai agent type %q", cfg.Type)
 	}
-	llmModel, err := newOpenAIModel(cfg.APIKey, cfg.Model, cfg.Timeout, cfg.Thinking)
+	llmModel, err := newOpenAIModel(cfg.APIKey, cfg.Model, cfg.Timeout, cfg.ReasoningEffort)
 	if err != nil {
 		return nil, err
 	}

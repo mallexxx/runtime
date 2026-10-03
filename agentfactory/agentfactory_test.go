@@ -703,12 +703,12 @@ func TestFactoryBuild_OpenAIProvider(t *testing.T) {
 	var capturedAPIKey string
 	var capturedModelName string
 	var capturedTimeout time.Duration
-	var capturedThinking string
-	newOpenAIModel = func(apiKey, modelName string, timeout time.Duration, thinking string) (model.LLM, error) {
+	var capturedReasoningEffort string
+	newOpenAIModel = func(apiKey, modelName string, timeout time.Duration, reasoningEffort string) (model.LLM, error) {
 		capturedAPIKey = apiKey
 		capturedModelName = modelName
 		capturedTimeout = timeout
-		capturedThinking = thinking
+		capturedReasoningEffort = reasoningEffort
 		return fakeHostedModel{name: "remote-openai"}, nil
 	}
 
@@ -722,10 +722,10 @@ func TestFactoryBuild_OpenAIProvider(t *testing.T) {
 		"openai": {
 			Type: agentconfig.AgentTypeOpenAI,
 			OpenAI: &agentconfig.LocalAPIConfig{
-				APIKey:   "openai-test-key",
-				Model:    "gpt-5",
-				Timeout:  "180s",
-				Thinking: "disabled",
+				APIKey:          "openai-test-key",
+				Model:           "gpt-5",
+				Timeout:         "180s",
+				ReasoningEffort: "none",
 			},
 			SystemInstructions: "from-config",
 			MCPServers:         []string{"docs"},
@@ -757,8 +757,8 @@ func TestFactoryBuild_OpenAIProvider(t *testing.T) {
 	if capturedModelName != "gpt-5" {
 		t.Fatalf("openai model name = %q, want gpt-5", capturedModelName)
 	}
-	if capturedTimeout != 180*time.Second || capturedThinking != "disabled" {
-		t.Fatalf("openai options = %v, %q", capturedTimeout, capturedThinking)
+	if capturedTimeout != 180*time.Second || capturedReasoningEffort != "none" {
+		t.Fatalf("openai options = %v, %q", capturedTimeout, capturedReasoningEffort)
 	}
 	if capturedCfg.Name != "shell-openai" {
 		t.Fatalf("hosted agent name = %q, want shell-openai", capturedCfg.Name)

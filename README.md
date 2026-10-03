@@ -52,12 +52,14 @@ runtime:
         api_key: ${DEEPSEEK_API_KEY}
         model: deepseek-v4-pro
         timeout: 180s
-        thinking: disabled
+        reasoning_effort: none
 ```
 
-`thinking` is omitted by default. Only `disabled` is currently supported, and
-only providers that accept the OpenAI-compatible `thinking.type` field should
-set it. Enabled thinking requires reasoning content to survive tool-call turns.
+`reasoning_effort` is the same config field name used by ACP providers. For
+OpenAI-compatible providers, only `none` is currently supported; it sends
+`thinking.type=disabled` on the wire. The field is omitted by default. Set it
+only for providers that accept `thinking.type`. Higher effort levels require
+reasoning content to survive tool-call turns.
 
 ### Validate runtime settings
 
